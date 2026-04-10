@@ -1,6 +1,9 @@
 #include "AmrLevelCurlCurl.H"
+#if USE_CUSTOM_CURLCURL
+#include "AMReX_MLCurlCurl_CNS.H"
+#else
 #include "AMReX_MLCurlCurl.H"
-// #include "AMReX_MLCurlCurl_CNS.H"
+#endif
 
 #include <AMReX_ParmParse.H>
 #include <AMReX_MultiFabUtil.H>
@@ -382,8 +385,12 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
   etype = {IntVect(0, 1), IntVect(1, 0), IntVect(1, 1)};
 #endif
 
-  Array<MultiFab, 3> Efield, rhs, betaCoef, alphaCoef;
+  Array<MultiFab, 3> Efield, rhs, betaCoef;
+#if USE_CUSTOM_CURLCURL
+  Array<MultiFab, 3> alphaCoef;
+#else
   MultiFab nodalAlpha;
+#endif
   for (int idim = 0; idim < 3; ++idim)
   {
     BoxArray edgeBA = convert(grids, etype[idim]);
@@ -393,6 +400,7 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
     Efield[idim].setVal(0.0);
     rhs[idim].setVal(0.0);
 
+#if USE_CUSTOM_CURLCURL
     if (AMREX_SPACEDIM < 3 && idim == 2)
     {
       alphaCoef[idim].define(grids, dmap, 1, ng);
@@ -402,16 +410,18 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
       BoxArray faceBA = convert(grids, IntVect::TheDimensionVector(idim));
       alphaCoef[idim].define(faceBA, dmap, 1, ng);
     }
+#endif
   }
+#if not(USE_CUSTOM_CURLCURL)
   {
     BoxArray nba = convert(grids, IndexType::TheNodeType());
     nodalAlpha.define(nba, dmap, 1, 0);
     nodalAlpha.setVal(0.0);
   }
+#endif
 
   // -----------------------------------------------------------------------
   // Helper: get eta and mu at cell centre (ic, jc) from cell indices.
-  // This matches the CNS get_props(ic, jc, kc) pattern.
   // -----------------------------------------------------------------------
   auto getCellEta = [=] AMREX_GPU_DEVICE (int ic, int jc, int kc) -> Real
   {
@@ -428,7 +438,6 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
 
   // -----------------------------------------------------------------------
   // Compute RHS, beta, alpha
-  // Uses cell-index-based property evaluation matching CNS pattern.
   // -----------------------------------------------------------------------
   for (MFIter mfi(Bcc_old, TilingIfNotGPU()); mfi.isValid(); ++mfi)
   {
@@ -446,19 +455,13 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
 
       ParallelFor(exBox, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
       {
-        // Real eta_face = harmonicAvg(getCellEta(i, j - 1), getCellEta(i, j));
-        const Real x = (i+0.5)*dx[0] + problo[0];
-        const Real y = j*dx[1] + problo[1];
-        // const Real eta_face = getEta(x,y,prob);
         const Real eta_face = harmonicAvg(getCellEta(i,j,k),getCellEta(i,j-1,k));
         betaEx(i, j, k) = getBeta(eta_face);
 
 #if (AMREX_SPACEDIM == 2)
         // Bz_cc lives at cell centres; divide by mu at each cell centre
-        Real mu_j   = getMuRel(x, y + 0.5 * dx[1], prob);
-        Real mu_jm1 = getMuRel(x, y - 0.5 * dx[1], prob);
-        rhsEx(i, j, k) = (bccArr(i, j, k, 2) / mu_j
-                         - bccArr(i, j - 1, k, 2) / mu_jm1) / dx[1];
+        rhsEx(i, j, k) = (bccArr(i, j, k, 2) / getCellMu(i,j,k)
+                         - bccArr(i, j - 1, k, 2) / getCellMu(i,j-1,k)) / dx[1];
 #else
         rhsEx(i, j, k) = 0.0; // TODO: 3D
 #endif
@@ -475,19 +478,13 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
 
       ParallelFor(eyBox, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
       {
-        // Real eta_face = harmonicAvg(getCellEta(i - 1, j), getCellEta(i, j));#
-        const Real x = i*dx[0] + problo[0];
-        const Real y = (j+0.5)*dx[1] + problo[1];
-        // const Real eta_face = getEta(x,y,prob);
         const Real eta_face = harmonicAvg(getCellEta(i,j,k),getCellEta(i-1,j,k));
         betaEy(i, j, k) = getBeta(eta_face);
 
 #if (AMREX_SPACEDIM == 2)
         // Bz_cc lives at cell centres; divide by mu at each cell centre
-        Real mu_i   = getMuRel(x + 0.5 * dx[0], y, prob);
-        Real mu_im1 = getMuRel(x - 0.5 * dx[0], y, prob);
-        rhsEy(i, j, k) = -(bccArr(i, j, k, 2) / mu_i
-                          - bccArr(i - 1, j, k, 2) / mu_im1) / dx[0];
+        rhsEy(i, j, k) = -(bccArr(i, j, k, 2) / getCellMu(i,j,k)
+                          - bccArr(i - 1, j, k, 2) / getCellMu(i-1,j,k)) / dx[0];
 #else
         rhsEy(i, j, k) = 0.0; // TODO: 3D
 #endif
@@ -497,8 +494,6 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
     // --- Ez component: centring (1,1) in 2D = (node-x, node-y) ---
     // Beta: harmonic avg of eta over 4 surrounding cells
     // RHS: d(By/mu)/dx - d(Bx/mu)/dy using face-centred B
-    // Mu averaging matches CNS: avg_mu_face over cell pairs flanking
-    // the node position (see ImplicitFD.cpp:3796-3804)
     {
       const Box& ezBox = mfi.tilebox(etype[2]);
       auto rhsEz = rhs[2].array(mfi);
@@ -514,27 +509,12 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
         Real eta_inv = 0.25 * (1.0 / (e_sw) + 1.0 / (e_se)
                               + 1.0 / (e_nw) + 1.0 / (e_ne));
         betaEz(i, j, k) = getBeta(1.0 / (eta_inv));
-        // const Real x = i*dx[0] + problo[0];
-        // const Real y = j*dx[1] + problo[1];
-        // const Real eta_node = getEta(x,y,prob);
-        // betaEz(i, j, k) = getBeta(eta_node);
 
         // Mu at face positions flanking the Ez node.
-        // Old approach: harmonic avg of cell-centred mu values
         Real mu_se_ne = harmonicAvg(getCellMu(i, j - 1, k), getCellMu(i, j, k));
         Real mu_sw_nw = harmonicAvg(getCellMu(i - 1, j - 1, k), getCellMu(i - 1, j, k));
         Real mu_nw_ne = harmonicAvg(getCellMu(i - 1, j, k), getCellMu(i, j, k));
         Real mu_sw_se = harmonicAvg(getCellMu(i - 1, j - 1, k), getCellMu(i, j - 1, k));
-
-        // New approach: evaluate mu directly at face centres
-        // By(i,j) lives at x-face (i*dx, (j+0.5)*dy)
-        // By(i-1,j) lives at x-face ((i-1)*dx, (j+0.5)*dy)
-        // Bx(i,j) lives at y-face ((i+0.5)*dx, j*dy)
-        // Bx(i,j-1) lives at y-face ((i+0.5)*dx, (j-1)*dy)
-        // Real mu_by_i   = getMuRel(x, y + 0.5 * dx[1], prob);
-        // Real mu_by_im1 = getMuRel(x - dx[0], y + 0.5 * dx[1], prob);
-        // Real mu_bx_j   = getMuRel(x + 0.5 * dx[0], y, prob);
-        // Real mu_bx_jm1 = getMuRel(x + 0.5 * dx[0], y - dx[1], prob);
 
         Real dHydx = (byArr(i, j, k) / mu_se_ne
                     - byArr(i - 1, j, k) / mu_sw_nw) / dx[0];
@@ -549,6 +529,7 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
     // x-face: alpha = dt / harmonic_avg(mu(i-1,j), mu(i,j))
     // y-face: alpha = dt / harmonic_avg(mu(i,j-1), mu(i,j))
     // 2D cell-centre: alpha = dt / mu(i,j)
+#if USE_CUSTOM_CURLCURL
     {
       const Box& xBox = grow(mfi.tilebox(IntVect::TheDimensionVector(0)), ng);
       auto ax = alphaCoef[0].array(mfi);
@@ -571,6 +552,7 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
         az(i, j, k) = dt / getCellMu(i, j, k);
       });
     }
+#else
     {
       const auto& nbx = mfi.nodaltilebox();
       const auto& an = nodalAlpha.array(mfi);
@@ -584,16 +566,21 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
         an(i,j,k) = dt * mu_inv;
       });
     }
+#endif
   }
 
   // Fill ghost cells
   for (int idim = 0; idim < 3; ++idim)
   {
     rhs[idim].FillBoundary(geom.periodicity());
-    alphaCoef[idim].FillBoundary(geom.periodicity());
     betaCoef[idim].FillBoundary(geom.periodicity());
+#if USE_CUSTOM_CURLCURL
+    alphaCoef[idim].FillBoundary(geom.periodicity());
+#endif
   }
+#if not(USE_CUSTOM_CURLCURL)
   nodalAlpha.FillBoundary(geom.periodicity());
+#endif
 
   // -----------------------------------------------------------------------
   // Set up and solve MLCurlCurl
@@ -601,8 +588,11 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
   LPInfo info;
   info.setMaxCoarseningLevel(s_max_coarsening_level);
 
+#if USE_CUSTOM_CURLCURL
+  MLCurlCurl_CNS mlcc({geom}, {grids}, {dmap}, info);
+#else
   MLCurlCurl mlcc({geom}, {grids}, {dmap}, info);
-  // MLCurlCurl_CNS mlcc({geom}, {grids}, {dmap}, info);
+#endif
 
   Array<LinOpBCType, AMREX_SPACEDIM> loBC, hiBC;
   for (int d = 0; d < AMREX_SPACEDIM; ++d)
@@ -613,17 +603,27 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
   mlcc.setDomainBC(loBC, hiBC);
 
   mlcc.setScalars(1.0, 1.0);
-  // AMREX_ASSERT(!nodalAlpha.contains_nan());
+#if USE_CUSTOM_CURLCURL
+  AMREX_ASSERT(!alphaCoef[0].contains_nan());
+  AMREX_ASSERT(!alphaCoef[1].contains_nan());
+  AMREX_ASSERT(!alphaCoef[2].contains_nan());
+#else
+  AMREX_ASSERT(!nodalAlpha.contains_nan());
+#endif
   AMREX_ASSERT(!betaCoef[0].contains_nan());
   AMREX_ASSERT(!betaCoef[1].contains_nan());
   AMREX_ASSERT(!betaCoef[2].contains_nan());
   AMREX_ASSERT(!rhs[0].contains_nan());
   AMREX_ASSERT(!rhs[1].contains_nan());
   AMREX_ASSERT(!rhs[2].contains_nan());
+
+#if USE_CUSTOM_CURLCURL
+  mlcc.setAlpha({Array<MultiFab const*, 3>{&alphaCoef[0],
+                                           &alphaCoef[1],
+                                           &alphaCoef[2]}});
+#else
   mlcc.setAlpha({&nodalAlpha});
-  // mlcc.setAlpha({Array<MultiFab const*, 3>{&alphaCoef[0],
-  //                                          &alphaCoef[1],
-  //                                          &alphaCoef[2]}});
+#endif
   mlcc.setBeta({Array<MultiFab const*, 3>{&betaCoef[0],
                                           &betaCoef[1],
                                           &betaCoef[2]}});

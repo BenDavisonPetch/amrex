@@ -9,6 +9,8 @@
 #include <AMReX_BCRec.H>
 #include <cmath>
 
+#define USE_CUSTOM_CURLCURL 0
+
 struct ProbParm
 {
   amrex::Real B0 = 1.0;
@@ -62,26 +64,6 @@ amrex::Real getEta (amrex::Real x, amrex::Real y,
   }
 }
 
-// //! Resistivity at a cell-centre position, smoothed with tanh profiles.
-// AMREX_GPU_DEVICE AMREX_FORCE_INLINE
-// amrex::Real getEta (amrex::Real x, amrex::Real y,
-//                     const ProbParm& prob)
-// {
-//   const amrex::Real xr = x - prob.core_position[0];
-//   const amrex::Real yr = y - prob.core_position[1];
-//   const amrex::Real r = std::sqrt(xr * xr + yr * yr);
-//   const amrex::Real w = prob.intf_width;
-
-//   // Smooth transition: free-space -> shell at r = core_radius
-//   // and shell -> free-space at r = shell_radius
-//   // phi_shell = 1 inside shell, 0 outside, smoothed by tanh
-//   const amrex::Real phi_inner = 0.5 * (1.0 + std::tanh((r - prob.core_radius) / w));
-//   const amrex::Real phi_outer = 0.5 * (1.0 + std::tanh((prob.shell_radius - r) / w));
-//   const amrex::Real phi_shell = phi_inner * phi_outer;
-
-//   return phi_shell * prob.eta_shell + (1.0 - phi_shell) * prob.eta_free_space;
-// }
-
 //! Relative permeability
 AMREX_GPU_DEVICE AMREX_FORCE_INLINE
 amrex::Real getMuRel (amrex::Real x, amrex::Real y,
@@ -97,24 +79,7 @@ amrex::Real getMuRel (amrex::Real x, amrex::Real y,
   return 1.0;
 }
 
-// //! Relative permeability at a position, smoothed with tanh profile.
-// AMREX_GPU_DEVICE AMREX_FORCE_INLINE
-// amrex::Real getMuRel (amrex::Real x, amrex::Real y,
-//                       const ProbParm& prob)
-// {
-//   const amrex::Real xr = x - prob.core_position[0];
-//   const amrex::Real yr = y - prob.core_position[1];
-//   const amrex::Real r = std::sqrt(xr * xr + yr * yr);
-//   const amrex::Real w = prob.mu_intf_width;
-
-//   // Smooth transition: mu_r_core inside core (r < core_radius), 1 outside
-//   const amrex::Real phi_core = 0.5 * (1.0 + std::tanh((prob.core_radius - r) / w));
-
-//   return phi_core * prob.mu_r_core + (1.0 - phi_core) * 1.0;
-// }
-
-//! Volume-averaged resistivity for cell (i,j,k).
-//! Uses 3-point Gauss-Legendre quadrature per direction (3x3 = 9 points in 2D).
+//! Get resistivity for a cell
 AMREX_GPU_DEVICE AMREX_FORCE_INLINE
 amrex::Real getEta (int i, int j, int /*k*/,
                     amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& problo,
@@ -124,29 +89,9 @@ amrex::Real getEta (int i, int j, int /*k*/,
   const amrex::Real xc = problo[0] + (amrex::Real(i) + amrex::Real(0.5)) * dx[0];
   const amrex::Real yc = problo[1] + (amrex::Real(j) + amrex::Real(0.5)) * dx[1];
   return getEta(xc,yc,prob);
-  // // 3-pt Gauss-Legendre: offset from centre = sqrt(3/5)/2, weights 5/18, 4/9, 5/18
-  // constexpr auto g  = amrex::Real(0.38729833462074170);
-  // constexpr auto w0 = amrex::Real(5.0/18.0);
-  // constexpr auto w1 = amrex::Real(4.0/ 9.0);
-
-  // const amrex::Real xc = problo[0] + (amrex::Real(i) + amrex::Real(0.5)) * dx[0];
-  // const amrex::Real yc = problo[1] + (amrex::Real(j) + amrex::Real(0.5)) * dx[1];
-
-  // const amrex::GpuArray<amrex::Real,3> xq = {xc - g*dx[0], xc, xc + g*dx[0]};
-  // const amrex::GpuArray<amrex::Real,3> yq = {yc - g*dx[1], yc, yc + g*dx[1]};
-  // const amrex::GpuArray<amrex::Real,3> wt = {w0, w1, w0};
-
-  // amrex::Real result = 0.0;
-  // for (int ii = 0; ii < 3; ++ii) {
-  //   for (int jj = 0; jj < 3; ++jj) {
-  //     result += wt[ii] * wt[jj] * getEta(xq[ii], yq[jj], prob);
-  //   }
-  // }
-  // return result;
 }
 
-//! Volume-averaged relative permeability for cell (i,j,k).
-//! Uses 3-point Gauss-Legendre quadrature per direction (3x3 = 9 points in 2D).
+//! Get relative permeability for a cell
 AMREX_GPU_DEVICE AMREX_FORCE_INLINE
 amrex::Real getMuRel (int i, int j, int /*k*/,
                       amrex::GpuArray<amrex::Real, AMREX_SPACEDIM> const& problo,
@@ -156,24 +101,6 @@ amrex::Real getMuRel (int i, int j, int /*k*/,
   const amrex::Real xc = problo[0] + (amrex::Real(i) + amrex::Real(0.5)) * dx[0];
   const amrex::Real yc = problo[1] + (amrex::Real(j) + amrex::Real(0.5)) * dx[1];
   return getMuRel(xc,yc,prob);
-  // constexpr auto g  = amrex::Real(0.38729833462074170);
-  // constexpr auto w0 = amrex::Real(5.0/18.0);
-  // constexpr auto w1 = amrex::Real(4.0/ 9.0);
-
-  // const amrex::Real xc = problo[0] + (amrex::Real(i) + amrex::Real(0.5)) * dx[0];
-  // const amrex::Real yc = problo[1] + (amrex::Real(j) + amrex::Real(0.5)) * dx[1];
-
-  // const amrex::GpuArray<amrex::Real,3> xq = {xc - g*dx[0], xc, xc + g*dx[0]};
-  // const amrex::GpuArray<amrex::Real,3> yq = {yc - g*dx[1], yc, yc + g*dx[1]};
-  // const amrex::GpuArray<amrex::Real,3> wt = {w0, w1, w0};
-
-  // amrex::Real result = 0.0;
-  // for (int ii = 0; ii < 3; ++ii) {
-  //   for (int jj = 0; jj < 3; ++jj) {
-  //     result += wt[ii] * wt[jj] * getMuRel(xq[ii], yq[jj], prob);
-  //   }
-  // }
-  // return result;
 }
 
 //! Analytical Bx for the dipole+uniform field (valid for r > r2).
