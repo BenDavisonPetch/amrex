@@ -1,5 +1,5 @@
-#ifndef AMREX_ML_CURL_CURL_H_
-#define AMREX_ML_CURL_CURL_H_
+#ifndef AMREX_ML_CURL_CURL_CNS_H_
+#define AMREX_ML_CURL_CURL_CNS_H_
 #include <AMReX_Config.H>
 
 #include <AMReX_MLLinOp.H>
