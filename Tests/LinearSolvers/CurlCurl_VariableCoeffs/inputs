@@ -35,7 +35,7 @@ prob.intf_width = 0.005
 prob.mu_intf_width = 0.05
 
 # Solver parameters
-solver.verbose = 0
+solver.verbose = 1
 solver.bottom_verbose = 0
 solver.max_iter = 1000
 solver.max_coarsening_level = 100
