@@ -1,4 +1,5 @@
 #include "AmrLevelCurlCurl.H"
+// #include "AMReX_MLCurlCurl.H"
 #include "AMReX_MLCurlCurl_CNS.H"
 
 #include <AMReX_ParmParse.H>
@@ -267,6 +268,11 @@ AmrLevelCurlCurl::initData ()
   Bz_new.setVal(0.0);
 #endif
 
+#if AMREX_SPACEDIM == 2
+  // Compute cell-centred Bz
+  MultiFab& Bcc_new = get_new_data(Bcc_Type);
+  Bcc_new.setVal(0.0);
+#endif
   // Cell-centred B
   computeBcc();
 
@@ -340,6 +346,7 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
   // Swap time levels
   for (int k = 0; k < NUM_STATE_TYPE; ++k)
   {
+    if (k == MatProp_Type) { continue; }
     state[k].allocOldData();
     state[k].swapTimeLevels(dt);
   }
@@ -365,6 +372,7 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
                          {&mf}, {time}, 0, 0, 1, geom, physbc, 0);
   }
   FillPatch(*this, Bcc_old, Bcc_old.nGrow(), time, Bcc_Type, 0, 3);
+  AMREX_ASSERT(!Bcc_old.contains_nan());
 
   // -----------------------------------------------------------------------
   // Build edge-centred MultiFabs for E, RHS, beta and face-centred alpha
@@ -379,6 +387,7 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
 #endif
 
   Array<MultiFab, 3> Efield, rhs, betaCoef, alphaCoef;
+  MultiFab nodalAlpha;
   for (int idim = 0; idim < 3; ++idim)
   {
     BoxArray edgeBA = convert(grids, etype[idim]);
@@ -397,6 +406,11 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
       BoxArray faceBA = convert(grids, IntVect::TheDimensionVector(idim));
       alphaCoef[idim].define(faceBA, dmap, 1, ng);
     }
+  }
+  {
+    BoxArray nba = convert(grids, IndexType::TheNodeType());
+    nodalAlpha.define(nba, dmap, 1, 0);
+    nodalAlpha.setVal(0.0);
   }
 
   // -----------------------------------------------------------------------
@@ -608,6 +622,21 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
       });
 #endif
     }
+    {
+      const auto& nbx = mfi.nodaltilebox();
+      const auto& an = nodalAlpha.array(mfi);
+      ParallelFor(nbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+      {
+        const Real xn = i*dx[0] + problo[0];
+        const Real yn = j*dx[1] + problo[1];
+        const Real mu1 = getMuRel(xn+0.5*dx[0], yn+0.5*dx[1],prob);
+        const Real mu2 = getMuRel(xn-0.5*dx[0], yn+0.5*dx[1],prob);
+        const Real mu3 = getMuRel(xn+0.5*dx[0], yn-0.5*dx[1],prob);
+        const Real mu4 = getMuRel(xn-0.5*dx[0], yn-0.5*dx[1],prob);
+        const Real mu_inv = 0.25 * (Real(1) / mu1 + Real(1) / mu2 + Real(1) / mu3 + Real(1) / mu4);
+        an(i,j,k) = dt / mu_inv;
+      });
+    }
   }
 
   // Fill ghost cells
@@ -617,16 +646,7 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
     alphaCoef[idim].FillBoundary(geom.periodicity());
     betaCoef[idim].FillBoundary(geom.periodicity());
   }
-
-  amrex::Print() << " max alpha x " << alphaCoef[0].norminf() << std::endl;
-  amrex::Print() << " max alpha y " << alphaCoef[1].norminf() << std::endl;
-  amrex::Print() << " max alpha z " << alphaCoef[2].norminf() << std::endl;
-  amrex::Print() << " max beta x " << betaCoef[0].norminf() << std::endl;
-  amrex::Print() << " max beta y " << betaCoef[1].norminf() << std::endl;
-  amrex::Print() << " max beta z " << betaCoef[2].norminf() << std::endl;
-  amrex::Print() << " max rhs x " << rhs[0].norminf() << std::endl;
-  amrex::Print() << " max rhs y " << rhs[1].norminf() << std::endl;
-  amrex::Print() << " max rhs z " << rhs[2].norminf() << std::endl;
+  nodalAlpha.FillBoundary(geom.periodicity());
 
   // -----------------------------------------------------------------------
   // Set up and solve MLCurlCurl
@@ -634,6 +654,7 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
   LPInfo info;
   info.setMaxCoarseningLevel(s_max_coarsening_level);
 
+  // MLCurlCurl mlcc({geom}, {grids}, {dmap}, info);
   MLCurlCurl_CNS mlcc({geom}, {grids}, {dmap}, info);
 
   Array<LinOpBCType, AMREX_SPACEDIM> loBC, hiBC;
@@ -645,6 +666,14 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
   mlcc.setDomainBC(loBC, hiBC);
 
   mlcc.setScalars(1.0, 1.0);
+  // AMREX_ASSERT(!nodalAlpha.contains_nan());
+  AMREX_ASSERT(!betaCoef[0].contains_nan());
+  AMREX_ASSERT(!betaCoef[1].contains_nan());
+  AMREX_ASSERT(!betaCoef[2].contains_nan());
+  AMREX_ASSERT(!rhs[0].contains_nan());
+  AMREX_ASSERT(!rhs[1].contains_nan());
+  AMREX_ASSERT(!rhs[2].contains_nan());
+  // mlcc.setAlpha({&nodalAlpha});
   mlcc.setAlpha({Array<MultiFab const*, 3>{&alphaCoef[0],
                                            &alphaCoef[1],
                                            &alphaCoef[2]}});
