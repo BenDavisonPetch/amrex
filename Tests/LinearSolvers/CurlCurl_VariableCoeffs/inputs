@@ -2,9 +2,9 @@
 # Transverse B field diffusing through a conducting cylindrical shell
 # surrounding a permeable core.
 
-max_step  = 100
+max_step  = 1000000
 strt_time = 0.0
-stop_time = 5.0
+stop_time = 10.0
 
 geometry.prob_lo = -1.0 -1.0
 geometry.prob_hi =  1.0  1.0
@@ -32,8 +32,6 @@ prob.shell_radius = 0.5
 prob.eta_shell = 0.01
 prob.eta_free_space = 1.0e5
 prob.fixed_dt = 0.01
-prob.intf_width = 0.005
-prob.mu_intf_width = 0.02
 
 # Solver parameters
 solver.verbose = 1
