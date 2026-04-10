@@ -4,6 +4,8 @@
 #include <AMReX_ParmParse.H>
 #include <AMReX_MultiFabUtil.H>
 #include <AMReX_FillPatchUtil.H>
+#include <AMReX_Interpolater.H>
+#include <AMReX_StateData.H>
 #include <AMReX_MLMG.H>
 #include <AMReX_TagBox.H>
 #include <AMReX_VisMF.H>
@@ -295,11 +297,15 @@ AmrLevelCurlCurl::init (AmrLevel& old)
   Real dt_old = cur_time - prev_time;
   setTimeLevel(cur_time, dt_old, dt_new);
 
-  for (int s = 0; s < NUM_STATE_TYPE; ++s)
-  {
-    MultiFab& S_new = get_new_data(s);
-    FillPatch(old, S_new, 0, cur_time, s, 0, S_new.nComp());
-  }
+  // Cell-centred states: standard FillPatch is safe
+  FillPatch(old, get_new_data(Bcc_Type), 0, cur_time, Bcc_Type, 0, 3);
+  FillPatch(old, get_new_data(MatProp_Type), 0, cur_time, MatProp_Type, 0, 2);
+
+  // Face-centred states: custom divfree fill-patch
+  fillFacesFromOldAndCoarse(old);
+
+  // Recompute MatProp at fine resolution
+  fillMatProps();
 }
 
 void
@@ -313,11 +319,15 @@ AmrLevelCurlCurl::init ()
 
   setTimeLevel(cur_time, dt_old, dt);
 
-  for (int s = 0; s < NUM_STATE_TYPE; ++s)
-  {
-    MultiFab& S_new = get_new_data(s);
-    FillCoarsePatch(S_new, 0, cur_time, s, 0, S_new.nComp());
-  }
+  // Cell-centred states: standard FillCoarsePatch is safe
+  FillCoarsePatch(get_new_data(Bcc_Type), 0, cur_time, Bcc_Type, 0, 3);
+  FillCoarsePatch(get_new_data(MatProp_Type), 0, cur_time, MatProp_Type, 0, 2);
+
+  // Face-centred states: custom divfree interp from coarse
+  fillFacesFromCoarse();
+
+  // Recompute MatProp at fine resolution
+  fillMatProps();
 }
 
 // ---------------------------------------------------------------------------
@@ -344,14 +354,16 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
   MultiFab& By_old = get_old_data(By_Type);
   MultiFab& Bcc_old = get_old_data(Bcc_Type);
 
-  // Fill ghost cells of old data
-  Bx_old.FillBoundary(geom.periodicity());
-  By_old.FillBoundary(geom.periodicity());
-  Bcc_old.FillBoundary(geom.periodicity());
-
-  // Fill physical boundaries for old data
-  FillPatch(*this, Bx_old, Bx_old.nGrow(), time, Bx_Type, 0, 1);
-  FillPatch(*this, By_old, By_old.nGrow(), time, By_Type, 0, 1);
+  // Fill ghost cells of old data.
+  // Use FillPatchSingleLevel for face types to avoid coarse-fine
+  // interpolation (face_divfree_interp requires array-based path).
+  for (int ft : {Bx_Type, By_Type})
+  {
+    MultiFab& mf = get_old_data(ft);
+    StateDataPhysBCFunct physbc(get_state_data(ft), 0, geom);
+    FillPatchSingleLevel(mf, mf.nGrowVect(), time,
+                         {&mf}, {time}, 0, 0, 1, geom, physbc, 0);
+  }
   FillPatch(*this, Bcc_old, Bcc_old.nGrow(), time, Bcc_Type, 0, 3);
 
   // -----------------------------------------------------------------------
@@ -911,6 +923,13 @@ AmrLevelCurlCurl::post_timestep (int /*iteration*/)
 void
 AmrLevelCurlCurl::post_regrid (int /*lbase*/, int /*new_finest*/)
 {
+  if (level > 0)
+  {
+    m_edge_flux_reg = std::make_unique<EdgeFluxRegister>(
+      grids, getLevel(level - 1).boxArray(),
+      dmap, getLevel(level - 1).DistributionMap(),
+      geom, getLevel(level - 1).Geom(), 1);
+  }
 }
 
 void
@@ -1048,4 +1067,162 @@ AmrLevelCurlCurl::avgDown ()
   MultiFab& crse_Bcc = get_new_data(Bcc_Type);
   average_down(fine_Bcc, crse_Bcc, fine_lev.geom, geom,
                0, 3, parent->refRatio(level));
+}
+
+// ---------------------------------------------------------------------------
+// AMR helpers: divergence-free face fill-patch
+// ---------------------------------------------------------------------------
+
+void
+AmrLevelCurlCurl::fillFacesFromCoarse ()
+{
+  AMREX_ASSERT(level > 0);
+
+  const int nGhost = get_new_data(Bx_Type).nGrow();
+  const auto& crse_lev = getLevel(level - 1);
+  const IntVect ratio = crse_ratio;
+
+  // State type indices for each face direction
+  const int face_types[AMREX_SPACEDIM] = {AMREX_D_DECL(Bx_Type, By_Type, Bz_Type)};
+
+  // 1. Copy coarse data onto coarsened-fine grids
+  Array<MultiFab, AMREX_SPACEDIM> crse_copy;
+  for (int d = 0; d < AMREX_SPACEDIM; ++d)
+  {
+    BoxArray cba = convert(grids, IntVect::TheDimensionVector(d));
+    cba.coarsen(ratio);
+    crse_copy[d].define(cba, dmap, 1, nGhost,
+                        MFInfo(), crse_lev.get_new_data(face_types[d]).Factory());
+    crse_copy[d].ParallelCopy(crse_lev.get_new_data(face_types[d]),
+                              0, 0, 1, nGhost, nGhost,
+                              crse_lev.Geom().periodicity());
+    crse_copy[d].FillBoundary(crse_lev.Geom().periodicity());
+  }
+
+  // 2. Divergence-free interpolation from coarse to fine
+  FaceDivFree face_interp;
+
+  // Build BCRec array (ext_dir on all faces, same for all directions)
+  int lo_bc[AMREX_SPACEDIM], hi_bc[AMREX_SPACEDIM];
+  for (int d = 0; d < AMREX_SPACEDIM; ++d)
+  {
+    lo_bc[d] = BCType::ext_dir;
+    hi_bc[d] = BCType::ext_dir;
+  }
+  BCRec bc(lo_bc, hi_bc);
+  Vector<Array<BCRec, AMREX_SPACEDIM>> bcrec_arr(1);
+  for (int d = 0; d < AMREX_SPACEDIM; ++d)
+  {
+    bcrec_arr[0][d] = bc;
+  }
+
+  for (MFIter mfi(get_new_data(Bcc_Type), MFItInfo().SetDynamic(true));
+       mfi.isValid(); ++mfi)
+  {
+    const Box& bx = grow(mfi.validbox(), nGhost);
+
+    Array<FArrayBox*, AMREX_SPACEDIM> crse_ptrs;
+    Array<FArrayBox*, AMREX_SPACEDIM> fine_ptrs;
+    Array<IArrayBox*, AMREX_SPACEDIM> mask_ptrs;
+    for (int d = 0; d < AMREX_SPACEDIM; ++d)
+    {
+      crse_ptrs[d] = &crse_copy[d][mfi];
+      fine_ptrs[d] = &get_new_data(face_types[d])[mfi];
+      mask_ptrs[d] = nullptr;
+    }
+
+    face_interp.interp_arr(crse_ptrs, 0, fine_ptrs, 0, 1, bx, ratio,
+                           mask_ptrs,
+                           crse_lev.Geom(), geom,
+                           bcrec_arr, 0, 0, RunOn::Cpu);
+  }
+}
+
+void
+AmrLevelCurlCurl::fillFacesFromOldAndCoarse (AmrLevel& old)
+{
+  AMREX_ASSERT(level > 0);
+
+  const int face_types[AMREX_SPACEDIM] = {AMREX_D_DECL(Bx_Type, By_Type, Bz_Type)};
+
+  // Build arrays of MultiFab pointers for fine-new, fine-old, coarse
+  Array<MultiFab*, AMREX_SPACEDIM> fine_new;
+  Array<MultiFab*, AMREX_SPACEDIM> fine_old;
+  Array<MultiFab*, AMREX_SPACEDIM> crse;
+  for (int d = 0; d < AMREX_SPACEDIM; ++d)
+  {
+    fine_new[d] = &get_new_data(face_types[d]);
+    fine_old[d] = &old.get_new_data(face_types[d]);
+    crse[d] = &getLevel(level - 1).get_new_data(face_types[d]);
+  }
+
+  // Build physical BC functors
+  auto& crse_lev = getLevel(level - 1);
+  Array<StateDataPhysBCFunct, AMREX_SPACEDIM> fine_bc_func = {AMREX_D_DECL(
+    StateDataPhysBCFunct(get_state_data(face_types[0]), 0, geom),
+    StateDataPhysBCFunct(get_state_data(face_types[1]), 0, geom),
+    StateDataPhysBCFunct(get_state_data(face_types[2]), 0, geom))};
+  Array<StateDataPhysBCFunct, AMREX_SPACEDIM> crse_bc_func = {AMREX_D_DECL(
+    StateDataPhysBCFunct(crse_lev.get_state_data(face_types[0]), 0, crse_lev.Geom()),
+    StateDataPhysBCFunct(crse_lev.get_state_data(face_types[1]), 0, crse_lev.Geom()),
+    StateDataPhysBCFunct(crse_lev.get_state_data(face_types[2]), 0, crse_lev.Geom()))};
+
+  // Build BCRec arrays
+  int lo_bc[AMREX_SPACEDIM], hi_bc[AMREX_SPACEDIM];
+  for (int d2 = 0; d2 < AMREX_SPACEDIM; ++d2)
+  {
+    lo_bc[d2] = BCType::ext_dir;
+    hi_bc[d2] = BCType::ext_dir;
+  }
+  BCRec bc(lo_bc, hi_bc);
+  Array<Vector<BCRec>, AMREX_SPACEDIM> bcrec_arr;
+  for (int d = 0; d < AMREX_SPACEDIM; ++d)
+  {
+    bcrec_arr[d].resize(1, bc);
+  }
+
+  const IntVect nghost = fine_new[0]->nGrowVect();
+  const Real cur_time = state[Bx_Type].curTime();
+
+  Interpolater* mapper = &face_divfree_interp;
+
+  FillPatchTwoLevels(
+    fine_new,
+    nghost,
+    cur_time,
+    {crse},
+    {cur_time},
+    {fine_old},
+    {cur_time},
+    0, 0, 1,
+    getLevel(level - 1).Geom(),
+    geom,
+    crse_bc_func, 0,
+    fine_bc_func, 0,
+    crse_ratio,
+    mapper,
+    bcrec_arr,
+    0);
+}
+
+void
+AmrLevelCurlCurl::fillMatProps ()
+{
+  const auto prob = *h_prob_parm;
+  const auto dx_arr = geom.CellSizeArray();
+  const auto problo = geom.ProbLoArray();
+
+  MultiFab& mp = get_new_data(MatProp_Type);
+  for (MFIter mfi(mp, TilingIfNotGPU()); mfi.isValid(); ++mfi)
+  {
+    const Box& bx = mfi.tilebox();
+    auto mpArr = mp.array(mfi);
+    ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+    {
+      Real x = problo[0] + (static_cast<Real>(i) + 0.5) * dx_arr[0];
+      Real y = problo[1] + (static_cast<Real>(j) + 0.5) * dx_arr[1];
+      mpArr(i, j, k, 0) = getMuRel(x, y, prob);
+      mpArr(i, j, k, 1) = getEta(x, y, prob);
+    });
+  }
 }
