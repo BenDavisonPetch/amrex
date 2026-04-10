@@ -1,6 +1,6 @@
 #include "AmrLevelCurlCurl.H"
-// #include "AMReX_MLCurlCurl.H"
-#include "AMReX_MLCurlCurl_CNS.H"
+#include "AMReX_MLCurlCurl.H"
+// #include "AMReX_MLCurlCurl_CNS.H"
 
 #include <AMReX_ParmParse.H>
 #include <AMReX_MultiFabUtil.H>
@@ -76,8 +76,6 @@ AmrLevelCurlCurl::readParams ()
     pp.query("eta_shell", h_prob_parm->eta_shell);
     pp.query("eta_free_space", h_prob_parm->eta_free_space);
     pp.query("fixed_dt", h_prob_parm->fixed_dt);
-    pp.query("intf_width", h_prob_parm->intf_width);
-    pp.query("mu_intf_width", h_prob_parm->mu_intf_width);
     pp.query("refine_max_r", h_prob_parm->refine_max_r);
     pp.query("refine_min_r", h_prob_parm->refine_min_r);
     // core_position is left at origin for now
@@ -284,10 +282,8 @@ AmrLevelCurlCurl::initData ()
     auto mpArr = mp.array(mfi);
     ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
     {
-      Real x = problo[0] + (static_cast<Real>(i) + 0.5) * dx[0];
-      Real y = problo[1] + (static_cast<Real>(j) + 0.5) * dx[1];
-      mpArr(i, j, k, 0) = getMuRel(x, y, prob);
-      mpArr(i, j, k, 1) = getEta(x, y, prob);
+      mpArr(i, j, k, 0) = getMuRel(i, j, k, problo, dx, prob);
+      mpArr(i, j, k, 1) = getEta(i, j, k, problo, dx, prob);
     });
   }
 }
@@ -417,18 +413,14 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
   // Helper: get eta and mu at cell centre (ic, jc) from cell indices.
   // This matches the CNS get_props(ic, jc, kc) pattern.
   // -----------------------------------------------------------------------
-  // auto getCellEta = [=] AMREX_GPU_DEVICE (int ic, int jc) -> Real
-  // {
-  //   Real xc = problo[0] + (static_cast<Real>(ic) + 0.5) * dx[0];
-  //   Real yc = problo[1] + (static_cast<Real>(jc) + 0.5) * dx[1];
-  //   return getEta(xc, yc, prob);
-  // };
-  // auto getCellMu = [=] AMREX_GPU_DEVICE (int ic, int jc) -> Real
-  // {
-  //   Real xc = problo[0] + (static_cast<Real>(ic) + 0.5) * dx[0];
-  //   Real yc = problo[1] + (static_cast<Real>(jc) + 0.5) * dx[1];
-  //   return getMuRel(xc, yc, prob);
-  // };
+  auto getCellEta = [=] AMREX_GPU_DEVICE (int ic, int jc, int kc) -> Real
+  {
+    return getEta(ic, jc, kc, problo, dx, prob);
+  };
+  auto getCellMu = [=] AMREX_GPU_DEVICE (int ic, int jc, int kc) -> Real
+  {
+    return getMuRel(ic, jc, kc, problo, dx, prob);
+  };
   auto getBeta = [] AMREX_GPU_DEVICE (Real eta) -> Real
   {
     return (eta > 1.0e-30) ? 1.0 / eta : 1.0e30;
@@ -457,7 +449,8 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
         // Real eta_face = harmonicAvg(getCellEta(i, j - 1), getCellEta(i, j));
         const Real x = (i+0.5)*dx[0] + problo[0];
         const Real y = j*dx[1] + problo[1];
-        const Real eta_face = getEta(x,y,prob);
+        // const Real eta_face = getEta(x,y,prob);
+        const Real eta_face = harmonicAvg(getCellEta(i,j,k),getCellEta(i,j-1,k));
         betaEx(i, j, k) = getBeta(eta_face);
 
 #if (AMREX_SPACEDIM == 2)
@@ -485,7 +478,8 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
         // Real eta_face = harmonicAvg(getCellEta(i - 1, j), getCellEta(i, j));#
         const Real x = i*dx[0] + problo[0];
         const Real y = (j+0.5)*dx[1] + problo[1];
-        const Real eta_face = getEta(x,y,prob);
+        // const Real eta_face = getEta(x,y,prob);
+        const Real eta_face = harmonicAvg(getCellEta(i,j,k),getCellEta(i-1,j,k));
         betaEy(i, j, k) = getBeta(eta_face);
 
 #if (AMREX_SPACEDIM == 2)
@@ -513,128 +507,81 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
       ParallelFor(ezBox, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
       {
         // 4 surrounding cells: SW=(i-1,j-1), SE=(i,j-1), NW=(i-1,j), NE=(i,j)
-        // Real e_sw = getCellEta(i - 1, j - 1);
-        // Real e_se = getCellEta(i, j - 1);
-        // Real e_nw = getCellEta(i - 1, j);
-        // Real e_ne = getCellEta(i, j);
-        // Real eta_inv = 0.25 * (1.0 / (e_sw) + 1.0 / (e_se)
-        //                       + 1.0 / (e_nw) + 1.0 / (e_ne));
-        // betaEz(i, j, k) = getBeta(1.0 / (eta_inv));
-        const Real x = i*dx[0] + problo[0];
-        const Real y = j*dx[1] + problo[1];
-        const Real eta_node = getEta(x,y,prob);
-        betaEz(i, j, k) = getBeta(eta_node);
+        Real e_sw = getCellEta(i - 1, j - 1, k);
+        Real e_se = getCellEta(i, j - 1, k);
+        Real e_nw = getCellEta(i - 1, j, k);
+        Real e_ne = getCellEta(i, j, k);
+        Real eta_inv = 0.25 * (1.0 / (e_sw) + 1.0 / (e_se)
+                              + 1.0 / (e_nw) + 1.0 / (e_ne));
+        betaEz(i, j, k) = getBeta(1.0 / (eta_inv));
+        // const Real x = i*dx[0] + problo[0];
+        // const Real y = j*dx[1] + problo[1];
+        // const Real eta_node = getEta(x,y,prob);
+        // betaEz(i, j, k) = getBeta(eta_node);
 
         // Mu at face positions flanking the Ez node.
         // Old approach: harmonic avg of cell-centred mu values
-        // Real mu_SE_NE = harmonicAvg(getCellMu(i, j - 1), getCellMu(i, j));
-        // Real mu_SW_NW = harmonicAvg(getCellMu(i - 1, j - 1), getCellMu(i - 1, j));
-        // Real mu_NW_NE = harmonicAvg(getCellMu(i - 1, j), getCellMu(i, j));
-        // Real mu_SW_SE = harmonicAvg(getCellMu(i - 1, j - 1), getCellMu(i, j - 1));
+        Real mu_se_ne = harmonicAvg(getCellMu(i, j - 1, k), getCellMu(i, j, k));
+        Real mu_sw_nw = harmonicAvg(getCellMu(i - 1, j - 1, k), getCellMu(i - 1, j, k));
+        Real mu_nw_ne = harmonicAvg(getCellMu(i - 1, j, k), getCellMu(i, j, k));
+        Real mu_sw_se = harmonicAvg(getCellMu(i - 1, j - 1, k), getCellMu(i, j - 1, k));
 
         // New approach: evaluate mu directly at face centres
         // By(i,j) lives at x-face (i*dx, (j+0.5)*dy)
         // By(i-1,j) lives at x-face ((i-1)*dx, (j+0.5)*dy)
         // Bx(i,j) lives at y-face ((i+0.5)*dx, j*dy)
         // Bx(i,j-1) lives at y-face ((i+0.5)*dx, (j-1)*dy)
-        Real mu_by_i   = getMuRel(x, y + 0.5 * dx[1], prob);
-        Real mu_by_im1 = getMuRel(x - dx[0], y + 0.5 * dx[1], prob);
-        Real mu_bx_j   = getMuRel(x + 0.5 * dx[0], y, prob);
-        Real mu_bx_jm1 = getMuRel(x + 0.5 * dx[0], y - dx[1], prob);
+        // Real mu_by_i   = getMuRel(x, y + 0.5 * dx[1], prob);
+        // Real mu_by_im1 = getMuRel(x - dx[0], y + 0.5 * dx[1], prob);
+        // Real mu_bx_j   = getMuRel(x + 0.5 * dx[0], y, prob);
+        // Real mu_bx_jm1 = getMuRel(x + 0.5 * dx[0], y - dx[1], prob);
 
-        Real dHydx = (byArr(i, j, k) / mu_by_i
-                    - byArr(i - 1, j, k) / mu_by_im1) / dx[0];
-        Real dHxdy = (bxArr(i, j, k) / mu_bx_j
-                    - bxArr(i, j - 1, k) / mu_bx_jm1) / dx[1];
+        Real dHydx = (byArr(i, j, k) / mu_se_ne
+                    - byArr(i - 1, j, k) / mu_sw_nw) / dx[0];
+        Real dHxdy = (bxArr(i, j, k) / mu_nw_ne
+                    - bxArr(i, j - 1, k) / mu_sw_se) / dx[1];
         rhsEz(i, j, k) = dHydx - dHxdy;
       });
     }
 
     // --- Alpha coefficients ---
-    // Old approach: harmonic avg of cell-centred mu
+    // Harmonic avg of cell-centred mu
     // x-face: alpha = dt / harmonic_avg(mu(i-1,j), mu(i,j))
     // y-face: alpha = dt / harmonic_avg(mu(i,j-1), mu(i,j))
     // 2D cell-centre: alpha = dt / mu(i,j)
-    // {
-    //   const Box& xBox = grow(mfi.tilebox(IntVect::TheDimensionVector(0)), ng);
-    //   auto ax = alphaCoef[0].array(mfi);
-    //   ParallelFor(xBox, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
-    //   {
-    //     ax(i, j, k) = dt / harmonicAvg(getCellMu(i - 1, j), getCellMu(i, j));
-    //   });
-    //
-    //   const Box& yBox = grow(mfi.tilebox(IntVect::TheDimensionVector(1)), ng);
-    //   auto ay = alphaCoef[1].array(mfi);
-    //   ParallelFor(yBox, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
-    //   {
-    //     ay(i, j, k) = dt / harmonicAvg(getCellMu(i, j - 1), getCellMu(i, j));
-    //   });
-    //
-    //   const Box& zBox = grow(mfi.tilebox(), ng);
-    //   auto az = alphaCoef[2].array(mfi);
-    //   ParallelFor(zBox, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
-    //   {
-    //     az(i, j, k) = dt / getCellMu(i, j);
-    //   });
-    // }
-
-    // New approach: evaluate mu directly at face centres
     {
-      // x-face at (i*dx, (j+0.5)*dy)
       const Box& xBox = grow(mfi.tilebox(IntVect::TheDimensionVector(0)), ng);
       auto ax = alphaCoef[0].array(mfi);
       ParallelFor(xBox, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
       {
-        Real xf = problo[0] + static_cast<Real>(i) * dx[0];
-        Real yc = problo[1] + (static_cast<Real>(j) + 0.5) * dx[1];
-        ax(i, j, k) = dt / getMuRel(xf, yc, prob);
+        ax(i, j, k) = dt / harmonicAvg(getCellMu(i - 1, j, k), getCellMu(i, j, k));
       });
-
-      // y-face at ((i+0.5)*dx, j*dy)
+    
       const Box& yBox = grow(mfi.tilebox(IntVect::TheDimensionVector(1)), ng);
       auto ay = alphaCoef[1].array(mfi);
       ParallelFor(yBox, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
       {
-        Real xc = problo[0] + (static_cast<Real>(i) + 0.5) * dx[0];
-        Real yf = problo[1] + static_cast<Real>(j) * dx[1];
-        ay(i, j, k) = dt / getMuRel(xc, yf, prob);
+        ay(i, j, k) = dt / harmonicAvg(getCellMu(i, j - 1, k), getCellMu(i, j, k));
       });
-
-#if (AMREX_SPACEDIM == 3)
-      // z-face at ((i+0.5)*dx, (j+0.5)*dy, k*dz)
-      const Box& zBox = grow(mfi.tilebox(IntVect::TheDimensionVector(2)), ng);
-      auto az = alphaCoef[2].array(mfi);
-      ParallelFor(zBox, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
-      {
-        Real xc = problo[0] + (static_cast<Real>(i) + 0.5) * dx[0];
-        Real yc = problo[1] + (static_cast<Real>(j) + 0.5) * dx[1];
-        az(i, j, k) = dt / getMuRel(xc, yc, prob);
-      });
-#else
-      // 2D cell-centred alpha for z-component at ((i+0.5)*dx, (j+0.5)*dy)
+    
       const Box& zBox = grow(mfi.tilebox(), ng);
       auto az = alphaCoef[2].array(mfi);
       ParallelFor(zBox, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
       {
-        Real xc = problo[0] + (static_cast<Real>(i) + 0.5) * dx[0];
-        Real yc = problo[1] + (static_cast<Real>(j) + 0.5) * dx[1];
-        az(i, j, k) = dt / getMuRel(xc, yc, prob);
+        az(i, j, k) = dt / getCellMu(i, j, k);
       });
-#endif
     }
     {
       const auto& nbx = mfi.nodaltilebox();
       const auto& an = nodalAlpha.array(mfi);
       ParallelFor(nbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
       {
-        const Real xn = i*dx[0] + problo[0];
-        const Real yn = j*dx[1] + problo[1];
-        const Real mu1 = getMuRel(xn+0.5*dx[0], yn+0.5*dx[1],prob);
-        const Real mu2 = getMuRel(xn-0.5*dx[0], yn+0.5*dx[1],prob);
-        const Real mu3 = getMuRel(xn+0.5*dx[0], yn-0.5*dx[1],prob);
-        const Real mu4 = getMuRel(xn-0.5*dx[0], yn-0.5*dx[1],prob);
+        const Real mu1 = getCellMu(i,j,k);
+        const Real mu2 = getCellMu(i-1,j,k);
+        const Real mu3 = getCellMu(i,j-1,k);
+        const Real mu4 = getCellMu(i-1,j-1,k);
         const Real mu_inv = 0.25 * (Real(1) / mu1 + Real(1) / mu2 + Real(1) / mu3 + Real(1) / mu4);
-        an(i,j,k) = dt / mu_inv;
+        an(i,j,k) = dt * mu_inv;
       });
     }
   }
@@ -654,8 +601,8 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
   LPInfo info;
   info.setMaxCoarseningLevel(s_max_coarsening_level);
 
-  // MLCurlCurl mlcc({geom}, {grids}, {dmap}, info);
-  MLCurlCurl_CNS mlcc({geom}, {grids}, {dmap}, info);
+  MLCurlCurl mlcc({geom}, {grids}, {dmap}, info);
+  // MLCurlCurl_CNS mlcc({geom}, {grids}, {dmap}, info);
 
   Array<LinOpBCType, AMREX_SPACEDIM> loBC, hiBC;
   for (int d = 0; d < AMREX_SPACEDIM; ++d)
@@ -673,10 +620,10 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
   AMREX_ASSERT(!rhs[0].contains_nan());
   AMREX_ASSERT(!rhs[1].contains_nan());
   AMREX_ASSERT(!rhs[2].contains_nan());
-  // mlcc.setAlpha({&nodalAlpha});
-  mlcc.setAlpha({Array<MultiFab const*, 3>{&alphaCoef[0],
-                                           &alphaCoef[1],
-                                           &alphaCoef[2]}});
+  mlcc.setAlpha({&nodalAlpha});
+  // mlcc.setAlpha({Array<MultiFab const*, 3>{&alphaCoef[0],
+  //                                          &alphaCoef[1],
+  //                                          &alphaCoef[2]}});
   mlcc.setBeta({Array<MultiFab const*, 3>{&betaCoef[0],
                                           &betaCoef[1],
                                           &betaCoef[2]}});
