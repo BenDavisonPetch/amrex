@@ -122,6 +122,15 @@ protected:
   //! Average-down face B and cell B from fine level.
   void avgDown ();
 
+  //! Fill face-centred B from coarse level using divergence-free interpolation.
+  void fillFacesFromCoarse ();
+
+  //! Fill face-centred B from old level and coarse level during regrid.
+  void fillFacesFromOldAndCoarse (amrex::AmrLevel& old);
+
+  //! Fill MatProp_Type from analytical mu/eta functions.
+  void fillMatProps ();
+
   AmrLevelCurlCurl& getLevel (int lev)
   {
     return *static_cast<AmrLevelCurlCurl*>(&parent->getLevel(lev));
