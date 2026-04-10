@@ -1,0 +1,47 @@
+# Permeable shell diffusion test
+# Transverse B field diffusing through a conducting cylindrical shell
+# surrounding a permeable core.
+
+max_step  = 100000
+strt_time = 0.0
+stop_time = 5.0
+
+geometry.prob_lo = -1.0 -1.0
+geometry.prob_hi =  1.0  1.0
+geometry.is_periodic = 0 0
+geometry.coord_sys = 0
+
+amr.n_cell = 128 128
+amr.max_level = 1
+amr.ref_ratio = 2
+amr.regrid_int = 4
+amr.blocking_factor = 8
+amr.max_grid_size = 64
+amr.subcycling_mode = None
+
+amr.plot_int = 50
+amr.checkpoint_files_output = 0
+amr.plot_file=output/plt
+
+# Problem parameters
+prob.B0 = 1.0
+prob.mu_r_core = 100
+prob.core_radius = 0.35
+prob.shell_radius = 0.5
+prob.eta_shell = 0.01
+prob.eta_free_space = 1.0e5
+prob.fixed_dt = 0.01
+prob.intf_width = 0.005
+prob.mu_intf_width = 0.05
+
+# Solver parameters
+solver.verbose = 0
+solver.bottom_verbose = 0
+solver.max_iter = 1000
+solver.max_coarsening_level = 100
+solver.tol_rel = 1.0e-10
+solver.tol_abs = 0.0
+
+# Tagging
+prob.refine_min_r = 0.3
+prob.refine_max_r = 0.55

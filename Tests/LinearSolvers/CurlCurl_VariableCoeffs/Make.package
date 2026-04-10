@@ -1,0 +1,4 @@
+CEXE_sources += main.cpp LevelBld.cpp AmrLevelCurlCurl.cpp AMReX_MLCurlCurl_CNS.cpp
+
+CEXE_headers += AmrLevelCurlCurl.H Prob_K.H
+CEXE_headers += AMReX_MLCurlCurl_CNS.H MLCurlCurl_CNS_K.H
