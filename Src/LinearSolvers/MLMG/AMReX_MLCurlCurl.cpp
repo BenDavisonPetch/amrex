@@ -51,6 +51,79 @@ void MLCurlCurl::define (const Vector<Geometry>& a_geom,
     for (int amrlev = 0; amrlev < m_num_amr_levels; ++amrlev) {
         m_lusolver[amrlev].resize(this->m_num_mg_levels[amrlev]);
     }
+
+    m_overset_mask.resize(this->m_num_amr_levels);
+    for (int amrlev = 0; amrlev < m_num_amr_levels; ++amrlev) {
+        m_overset_mask[amrlev].resize(this->m_num_mg_levels[amrlev]);
+    }
+}
+
+void MLCurlCurl::define (const Vector<Geometry>& a_geom,
+                         const Vector<BoxArray>& a_grids,
+                         const Vector<DistributionMapping>& a_dmap,
+                         const Vector<Array<const iMultiFab*, 3>>& a_overset_mask,
+                         const LPInfo& a_info, int a_coord)
+{
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(a_overset_mask.size() == 1,
+                                     "AMR not currently supported with overset mask");
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(a_info.max_coarsening_level == 0,
+                                     "Haven't implemented MG with overset masks yet soz");
+
+    // Define overset mask multifabs and copy over
+    m_overset_mask.resize(m_num_amr_levels);
+    for (int amrlev = 0; amrlev < m_num_amr_levels; ++amrlev) {
+        constexpr int ng_osm = 0; // actually might need to be 2 for cf boundaries?? might not need to use osm for those tho
+        m_overset_mask[amrlev].push_back({std::make_unique<iMultiFab>(amrex::convert(a_grids[amrlev], m_etype[0]),
+                                                                         a_dmap[amrlev], 1, ng_osm),
+                                            std::make_unique<iMultiFab>(amrex::convert(a_grids[amrlev], m_etype[1]),
+                                                                         a_dmap[amrlev], 1, ng_osm),
+                                                std::make_unique<iMultiFab>(amrex::convert(a_grids[amrlev], m_etype[1]),
+                                                                         a_dmap[amrlev], 1, ng_osm),});
+        for (int idim = 0; idim < 3; ++idim) {
+            iMultiFab::Copy(*(m_overset_mask[amrlev][0][idim]), *a_overset_mask[amrlev][idim], 0, 0, 1, 0);
+        }                                                                 
+        if (amrlev > 1) {
+            AMREX_ALWAYS_ASSERT(amrex::refine(a_geom[amrlev-1].Domain(),2)
+                                == a_geom[amrlev].Domain());
+        }
+    }
+
+    // TODO: determine max MG coarsening level based on overset mask
+    // (mixed faces not allowed)
+    MLLinOpT<MF>::define(a_geom, a_grids, a_dmap, a_info, {});
+
+    // Initialise everything else normally
+    m_coord = a_coord;
+#if (AMREX_SPACEDIM == 2)
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_coord == 0,
+                                     "CurlCurl: In 2D, only Cartesian is supported.");
+#elif (AMREX_SPACEDIM == 3)
+    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(m_coord == 0,
+                                     "CurlCurl: In 3D, only Cartesian is supported.");
+#endif
+    if (m_coord == 1 || m_coord == 2) {
+        AMREX_ALWAYS_ASSERT(a_geom[0].ProbLo(0) == 0);
+    }
+
+    m_dotmask.resize(this->m_num_amr_levels);
+    for (int amrlev = 0; amrlev < m_num_amr_levels; ++amrlev) {
+        m_dotmask[amrlev].resize(this->m_num_mg_levels[amrlev]);
+    }
+
+    m_bcoefs.resize(this->m_num_amr_levels);
+    for (int amrlev = 0; amrlev < m_num_amr_levels; ++amrlev) {
+        m_bcoefs[amrlev].resize(this->m_num_mg_levels[amrlev]);
+    }
+
+    m_acoefs.resize(this->m_num_amr_levels);
+    for (int amrlev = 0; amrlev < m_num_amr_levels; ++amrlev) {
+        m_acoefs[amrlev].resize(this->m_num_mg_levels[amrlev]);
+    }
+
+    m_lusolver.resize(this->m_num_amr_levels);
+    for (int amrlev = 0; amrlev < m_num_amr_levels; ++amrlev) {
+        m_lusolver[amrlev].resize(this->m_num_mg_levels[amrlev]);
+    }
 }
 
 void MLCurlCurl::setScalars (RT a_alpha, RT a_beta) noexcept
@@ -411,13 +484,22 @@ MLCurlCurl::apply (int amrlev, int mglev, MF& out, MF& in, BCMode /*bc_mode*/,
                 bcy = m_bcoefs[amrlev][mglev][1]->const_array(mfi);
                 bcz = m_bcoefs[amrlev][mglev][2]->const_array(mfi);
             }
+            Array4<int const> xosm, yosm, zosm;
+            if (m_overset_mask[amrlev][mglev][0])
+            {
+                AMREX_ASSERT(m_overset_mask[amrlev][mglev][1]);
+                AMREX_ASSERT(m_overset_mask[amrlev][mglev][2]);
+                xosm = m_overset_mask[amrlev][mglev][0]->const_array(mfi);
+                yosm = m_overset_mask[amrlev][mglev][1]->const_array(mfi);
+                zosm = m_overset_mask[amrlev][mglev][2]->const_array(mfi);
+            }
             auto const afx = m_acoefs[amrlev][mglev][0]->const_array(mfi);
             auto const afy = m_acoefs[amrlev][mglev][1]->const_array(mfi);
             auto const afz = m_acoefs[amrlev][mglev][2]->const_array(mfi);
             amrex::ParallelFor(xbx, ybx, zbx,
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
-                if (dinfo.is_dirichlet_x_edge(i,j,k)) {
+                if (dinfo.is_dirichlet_x_edge(i,j,k) || (xosm && xosm(i,j,k) == 0)) {
                     xout(i,j,k) = Real(0.0);
                 } else {
                     Real beta = bcx ? bcx(i,j,k) : b;
@@ -427,7 +509,7 @@ MLCurlCurl::apply (int amrlev, int mglev, MF& out, MF& in, BCMode /*bc_mode*/,
             },
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
-                if (dinfo.is_dirichlet_y_edge(i,j,k)) {
+                if (dinfo.is_dirichlet_y_edge(i,j,k) || (yosm && yosm(i,j,k) == 0)) {
                     yout(i,j,k) = Real(0.0);
                 } else {
                     Real beta = bcy ? bcy(i,j,k) : b;
@@ -441,7 +523,7 @@ MLCurlCurl::apply (int amrlev, int mglev, MF& out, MF& in, BCMode /*bc_mode*/,
             },
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
-                if (dinfo.is_dirichlet_z_edge(i,j,k)) {
+                if (dinfo.is_dirichlet_z_edge(i,j,k) || (zosm && zosm(i,j,k) == 0)) {
                     zout(i,j,k) = Real(0.0);
                 } else {
                     Real beta = bcz ? bcz(i,j,k) : b;
@@ -457,10 +539,19 @@ MLCurlCurl::apply (int amrlev, int mglev, MF& out, MF& in, BCMode /*bc_mode*/,
             auto const& bcx = m_bcoefs[amrlev][mglev][0]->const_array(mfi);
             auto const& bcy = m_bcoefs[amrlev][mglev][1]->const_array(mfi);
             auto const& bcz = m_bcoefs[amrlev][mglev][2]->const_array(mfi);
+            Array4<int const> xosm, yosm, zosm;
+            if (m_overset_mask[amrlev][mglev][0])
+            {
+                AMREX_ASSERT(m_overset_mask[amrlev][mglev][1]);
+                AMREX_ASSERT(m_overset_mask[amrlev][mglev][2]);
+                xosm = m_overset_mask[amrlev][mglev][0]->const_array(mfi);
+                yosm = m_overset_mask[amrlev][mglev][1]->const_array(mfi);
+                zosm = m_overset_mask[amrlev][mglev][2]->const_array(mfi);
+            }
             amrex::ParallelFor(xbx, ybx, zbx,
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
-                if (dinfo.is_dirichlet_x_edge(i,j,k)) {
+                if (dinfo.is_dirichlet_x_edge(i,j,k) || (xosm && xosm(i,j,k) == 0)) {
                     xout(i,j,k) = Real(0.0);
                 } else {
                     mlcurlcurl_adotx_x(i,j,k,xout,xin,yin,zin,bcx(i,j,k),adxinv);
@@ -468,7 +559,7 @@ MLCurlCurl::apply (int amrlev, int mglev, MF& out, MF& in, BCMode /*bc_mode*/,
             },
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
-                if (dinfo.is_dirichlet_y_edge(i,j,k)) {
+                if (dinfo.is_dirichlet_y_edge(i,j,k) || (yosm && yosm(i,j,k) == 0)) {
                     yout(i,j,k) = Real(0.0);
                 } else {
                     mlcurlcurl_adotx_y(i,j,k,yout,xin,yin,zin,bcy(i,j,k),adxinv
@@ -480,7 +571,7 @@ MLCurlCurl::apply (int amrlev, int mglev, MF& out, MF& in, BCMode /*bc_mode*/,
             },
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
-                if (dinfo.is_dirichlet_z_edge(i,j,k)) {
+                if (dinfo.is_dirichlet_z_edge(i,j,k) || (zosm && zosm(i,j,k) == 0)) {
                     zout(i,j,k) = Real(0.0);
                 } else {
                     mlcurlcurl_adotx_z(i,j,k,zout,xin,yin,zin,bcz(i,j,k),adxinv
@@ -491,10 +582,19 @@ MLCurlCurl::apply (int amrlev, int mglev, MF& out, MF& in, BCMode /*bc_mode*/,
                 }
             });
         } else {
+            Array4<int const> xosm, yosm, zosm;
+            if (m_overset_mask[amrlev][mglev][0])
+            {
+                AMREX_ASSERT(m_overset_mask[amrlev][mglev][1]);
+                AMREX_ASSERT(m_overset_mask[amrlev][mglev][2]);
+                xosm = m_overset_mask[amrlev][mglev][0]->const_array(mfi);
+                yosm = m_overset_mask[amrlev][mglev][1]->const_array(mfi);
+                zosm = m_overset_mask[amrlev][mglev][2]->const_array(mfi);
+            }
             amrex::ParallelFor(xbx, ybx, zbx,
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
-                if (dinfo.is_dirichlet_x_edge(i,j,k)) {
+                if (dinfo.is_dirichlet_x_edge(i,j,k) || (xosm && xosm(i,j,k) == 0)) {
                     xout(i,j,k) = Real(0.0);
                 } else {
                     mlcurlcurl_adotx_x(i,j,k,xout,xin,yin,zin,b,adxinv);
@@ -502,7 +602,7 @@ MLCurlCurl::apply (int amrlev, int mglev, MF& out, MF& in, BCMode /*bc_mode*/,
             },
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
-                if (dinfo.is_dirichlet_y_edge(i,j,k)) {
+                if (dinfo.is_dirichlet_y_edge(i,j,k) || (yosm && yosm(i,j,k) == 0)) {
                     yout(i,j,k) = Real(0.0);
                 } else {
                     mlcurlcurl_adotx_y(i,j,k,yout,xin,yin,zin,b,adxinv
@@ -514,7 +614,7 @@ MLCurlCurl::apply (int amrlev, int mglev, MF& out, MF& in, BCMode /*bc_mode*/,
             },
             [=] AMREX_GPU_DEVICE (int i, int j, int k)
             {
-                if (dinfo.is_dirichlet_z_edge(i,j,k)) {
+                if (dinfo.is_dirichlet_z_edge(i,j,k) || (zosm && zosm(i,j,k) == 0)) {
                     zout(i,j,k) = Real(0.0);
                 } else {
                     mlcurlcurl_adotx_z(i,j,k,zout,xin,yin,zin,b,adxinv
@@ -683,6 +783,7 @@ void MLCurlCurl::smooth4 (int amrlev, int mglev, MF& sol, MF const& rhs,
 
     bool const has_beta = (m_bcoefs[amrlev][mglev][0] != nullptr);
     bool const has_alpha = (m_acoefs[amrlev][mglev][0] != nullptr);
+    bool const has_osm = (m_overset_mask[amrlev][mglev][0] != nullptr);
     bool const use_pcg = m_use_pcg || has_alpha;
     // We support LU solver with variable beta and scalar alpha.
 
@@ -691,7 +792,7 @@ void MLCurlCurl::smooth4 (int amrlev, int mglev, MF& sol, MF const& rhs,
 
     MultiFab nmf(amrex::convert(rhs[0].boxArray(),IntVect(1)),
                  rhs[0].DistributionMap(), 1, 0, MFInfo().SetAlloc(false));
-    if (m_lusolver[amrlev][mglev] && !has_alpha && !has_beta) {
+    if (m_lusolver[amrlev][mglev] && !has_alpha && !has_beta && !has_osm) {
 #if (AMREX_SPACEDIM == 2)
         auto b = m_beta;
 #endif
@@ -713,30 +814,67 @@ void MLCurlCurl::smooth4 (int amrlev, int mglev, MF& sol, MF const& rhs,
         auto const& bcx = m_bcoefs[amrlev][mglev][0]->const_arrays();
         auto const& bcy = m_bcoefs[amrlev][mglev][1]->const_arrays();
         auto const& bcz = m_bcoefs[amrlev][mglev][2]->const_arrays();
-        ParallelFor(nmf, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+        if (has_osm)
         {
-            mlcurlcurl_gs4_alpha(i,j,k,ex[bno],ey[bno],ez[bno],
-                                 rhsx[bno],rhsy[bno],rhsz[bno],
-                                 dxinv,color,
-                                 acx[bno],acy[bno],acz[bno],
-                                 bcx[bno],bcy[bno],bcz[bno],
-                                 b,dinfo,sinfo);
-        });
+#if AMREX_SPACEDIM == 2
+            auto const& nosm = m_overset_mask[amrlev][mglev][2]->const_arrays();
+#else
+            Abort("Not implemented for SPACEDIM != 2 right now!");
+#endif
+            ParallelFor(nmf, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+            {
+                mlcurlcurl_gs4_alpha_os(i,j,k,ex[bno],ey[bno],ez[bno],
+                                    rhsx[bno],rhsy[bno],rhsz[bno],
+                                    dxinv,color,
+                                    acx[bno],acy[bno],acz[bno],
+                                    bcx[bno],bcy[bno],bcz[bno],
+                                    b,nosm[bno],dinfo,sinfo);
+            });
+        } else {
+            ParallelFor(nmf, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+            {
+                mlcurlcurl_gs4_alpha(i,j,k,ex[bno],ey[bno],ez[bno],
+                                    rhsx[bno],rhsy[bno],rhsz[bno],
+                                    dxinv,color,
+                                    acx[bno],acy[bno],acz[bno],
+                                    bcx[bno],bcy[bno],bcz[bno],
+                                    b,dinfo,sinfo);
+            });
+        }
     } else if (has_alpha && !has_beta) {
         auto const& acx = m_acoefs[amrlev][mglev][0]->const_arrays();
         auto const& acy = m_acoefs[amrlev][mglev][1]->const_arrays();
         auto const& acz = m_acoefs[amrlev][mglev][2]->const_arrays();
         auto b = m_beta;
-        ParallelFor(nmf, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+        if (has_osm)
         {
-            Array4<Real const> empty;
-            mlcurlcurl_gs4_alpha(i,j,k,ex[bno],ey[bno],ez[bno],
-                                 rhsx[bno],rhsy[bno],rhsz[bno],
-                                 dxinv,color,
-                                 acx[bno],acy[bno],acz[bno],
-                                 empty,empty,empty,
-                                 b,dinfo,sinfo);
-        });
+#if AMREX_SPACEDIM == 2
+            auto const& nosm = m_overset_mask[amrlev][mglev][2]->const_arrays();
+#else
+            Abort("Not implemented for SPACEDIM != 2 right now!");
+#endif
+            ParallelFor(nmf, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+            {
+                Array4<Real const> empty;
+                mlcurlcurl_gs4_alpha_os(i,j,k,ex[bno],ey[bno],ez[bno],
+                                    rhsx[bno],rhsy[bno],rhsz[bno],
+                                    dxinv,color,
+                                    acx[bno],acy[bno],acz[bno],
+                                    empty,empty,empty,
+                                    b,nosm[bno],dinfo,sinfo);
+            });
+        } else {
+            ParallelFor(nmf, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+            {
+                Array4<Real const> empty;
+                mlcurlcurl_gs4_alpha(i,j,k,ex[bno],ey[bno],ez[bno],
+                                    rhsx[bno],rhsy[bno],rhsz[bno],
+                                    dxinv,color,
+                                    acx[bno],acy[bno],acz[bno],
+                                    empty,empty,empty,
+                                    b,dinfo,sinfo);
+            });
+        }
     } else {
         // This branch covers scalar alpha and variable beta.
         // If LU is used, we will build local solvers.
@@ -1310,6 +1448,30 @@ void MLCurlCurl::update ()
     if (m_needs_update) {
         update_lusolver();
         m_needs_update = false;
+    }
+}
+
+void MLCurlCurl::applyOverset (int amrlev, Array<MultiFab,3>& rhs) const
+{
+    // is this only called on the coarsest level?
+    if (m_overset_mask[amrlev][0][0]) {
+        for (int idim = 0; idim < 3; ++idim)
+        {
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(*m_overset_mask[amrlev][0][idim],TilingIfNotGPU()); mfi.isValid(); ++mfi)
+            {
+                const Box& bx = mfi.tilebox();
+                auto const& rfab = rhs[idim].array(mfi);
+                auto const& osm = m_overset_mask[amrlev][0][idim]->const_array(mfi);
+                // todo: make this a version that doesn't specify n
+                AMREX_HOST_DEVICE_PARALLEL_FOR_4D(bx, 1, i, j, k, n,
+                {
+                    if (osm(i,j,k) == 0) { rfab(i,j,k,n) = RT(0.0); }
+                });
+            }
+        }
     }
 }
 

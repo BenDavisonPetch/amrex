@@ -386,6 +386,7 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
 #endif
 
   Array<MultiFab, 3> Efield, rhs, betaCoef;
+  Array<iMultiFab, 3> overset_mask;
 #if USE_CUSTOM_CURLCURL
   Array<MultiFab, 3> alphaCoef;
 #else
@@ -399,6 +400,9 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
     betaCoef[idim].define(edgeBA, dmap, 1, 0);
     Efield[idim].setVal(0.0);
     rhs[idim].setVal(0.0);
+    
+    overset_mask[idim].define(edgeBA, dmap, 1, 0);
+    overset_mask[idim].setVal(1);
 
 #if USE_CUSTOM_CURLCURL
     if (AMREX_SPACEDIM < 3 && idim == 2)
@@ -431,9 +435,15 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
   {
     return getMuRel(ic, jc, kc, problo, dx, prob);
   };
+  constexpr Real threshold = 1e-10;
+  constexpr Real inv_threshold = 1/threshold;
   auto getBeta = [] AMREX_GPU_DEVICE (Real eta) -> Real
   {
-    return (eta > 1.0e-30) ? 1.0 / eta : 1.0e30;
+    return (eta > threshold) ? 1.0 / eta : inv_threshold;
+  };
+  auto isIdeal = [] AMREX_GPU_DEVICE (Real eta) -> bool
+  {
+    return eta <= threshold;
   };
 
   // -----------------------------------------------------------------------
@@ -452,11 +462,15 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
       const Box& exBox = mfi.tilebox(etype[0]);
       auto rhsEx = rhs[0].array(mfi);
       auto betaEx = betaCoef[0].array(mfi);
+      auto osm = overset_mask[0].array(mfi);
 
       ParallelFor(exBox, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
       {
-        const Real eta_face = harmonicAvg(getCellEta(i,j,k),getCellEta(i,j-1,k));
+        const Real eta_up = getCellEta(i,j,k);
+        const Real eta_down = getCellEta(i,j-1,k);
+        const Real eta_face = harmonicAvg(eta_up,eta_down);
         betaEx(i, j, k) = getBeta(eta_face);
+        osm(i,j,k) = (isIdeal(eta_up) || isIdeal(eta_down)) ? 0 : 1;
 
 #if (AMREX_SPACEDIM == 2)
         // Bz_cc lives at cell centres; divide by mu at each cell centre
@@ -475,11 +489,15 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
       const Box& eyBox = mfi.tilebox(etype[1]);
       auto rhsEy = rhs[1].array(mfi);
       auto betaEy = betaCoef[1].array(mfi);
+      auto osm = overset_mask[1].array(mfi);
 
       ParallelFor(eyBox, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
       {
-        const Real eta_face = harmonicAvg(getCellEta(i,j,k),getCellEta(i-1,j,k));
+        const Real eta_right = getCellEta(i,j,k);
+        const Real eta_left = getCellEta(i-1,j,k);
+        const Real eta_face = harmonicAvg(eta_right,eta_left);
         betaEy(i, j, k) = getBeta(eta_face);
+        osm(i,j,k) = (isIdeal(eta_right) || isIdeal(eta_left)) ? 0 : 1;
 
 #if (AMREX_SPACEDIM == 2)
         // Bz_cc lives at cell centres; divide by mu at each cell centre
@@ -498,6 +516,7 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
       const Box& ezBox = mfi.tilebox(etype[2]);
       auto rhsEz = rhs[2].array(mfi);
       auto betaEz = betaCoef[2].array(mfi);
+      auto osm = overset_mask[2].array(mfi);
 
       ParallelFor(ezBox, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
       {
@@ -509,6 +528,8 @@ AmrLevelCurlCurl::advance (Real time, Real dt, int /*iteration*/, int /*ncycle*/
         Real eta_inv = 0.25 * (1.0 / (e_sw) + 1.0 / (e_se)
                               + 1.0 / (e_nw) + 1.0 / (e_ne));
         betaEz(i, j, k) = getBeta(1.0 / (eta_inv));
+
+        osm(i,j,k) = (isIdeal(e_sw) || isIdeal(e_se) || isIdeal(e_nw) || isIdeal(e_ne)) ? 0 : 1;
 
         // Mu at face positions flanking the Ez node.
         Real mu_se_ne = harmonicAvg(getCellMu(i, j - 1, k), getCellMu(i, j, k));

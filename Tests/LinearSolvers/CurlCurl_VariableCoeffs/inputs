@@ -29,7 +29,7 @@ prob.B0 = 1.0
 prob.mu_r_core = 100
 prob.core_radius = 0.35
 prob.shell_radius = 0.5
-prob.eta_shell = 0.01
+prob.eta_shell = 0
 prob.eta_free_space = 1.0e5
 prob.fixed_dt = 0.01
 

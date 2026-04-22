@@ -47,6 +47,13 @@ public:
                  const LPInfo& a_info = LPInfo(),
                  int a_coord = 0);
 
+    void define (const Vector<Geometry>& a_geom,
+                 const Vector<BoxArray>& a_grids,
+                 const Vector<DistributionMapping>& a_dmap,
+                 const Vector<Array<const iMultiFab*, 3>>& a_overset_mask,
+                 const LPInfo& a_info = LPInfo(),
+                 int a_coord = 0);
+
     //! Set scalar coefficients.  This clears any previously supplied nodal alpha
     //! or edge-centered beta MultiFabs, so call setAlpha/setBeta afterwards if
     //! you still need spatially varying coefficients.
@@ -140,6 +147,8 @@ public:
 
     void applyPhysBC (int amrlev, int mglev, MultiFab& mf, CurlCurlStateType type) const;
 
+    void applyOverset (int amrlev, Array<MultiFab,3>& rhs) const override;
+
 private:
 
     void applyBC (int amrlev, int mglev, MF& in, CurlCurlStateType type) const;
@@ -177,6 +186,8 @@ private:
     Vector<Vector<Array<std::unique_ptr<MultiFab>,3>>> m_acoefs;
     bool m_use_pcg = false;
     bool m_needs_update = true;
+
+    Vector<Vector<Array<std::unique_ptr<iMultiFab>,3>>> m_overset_mask;
 };
 
 }
