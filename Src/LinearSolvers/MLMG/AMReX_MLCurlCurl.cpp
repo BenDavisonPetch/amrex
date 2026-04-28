@@ -56,6 +56,11 @@ void MLCurlCurl::define (const Vector<Geometry>& a_geom,
     for (int amrlev = 0; amrlev < m_num_amr_levels; ++amrlev) {
         m_overset_mask[amrlev].resize(this->m_num_mg_levels[amrlev]);
     }
+
+    m_nodal_overset_mask.resize(this->m_num_amr_levels);
+    for (int amrlev = 0; amrlev < m_num_amr_levels; ++amrlev) {
+        m_nodal_overset_mask[amrlev].resize(this->m_num_mg_levels[amrlev]);
+    }
 }
 
 void MLCurlCurl::define (const Vector<Geometry>& a_geom,
@@ -127,6 +132,41 @@ void MLCurlCurl::define (const Vector<Geometry>& a_geom,
     m_lusolver.resize(this->m_num_amr_levels);
     for (int amrlev = 0; amrlev < m_num_amr_levels; ++amrlev) {
         m_lusolver[amrlev].resize(this->m_num_mg_levels[amrlev]);
+    }
+
+    // Build truly-nodal overset mask from the user-supplied edge/face masks.
+    // node_mask = 1 iff every DOF the smoother stencil at (i,j,k) touches is
+    // unmasked (osm = 1); 0 if any of those DOFs is masked.
+    m_nodal_overset_mask.resize(namrlevs);
+    for (int amrlev = 0; amrlev < namrlevs; ++amrlev) {
+        m_nodal_overset_mask[amrlev].resize(this->m_num_mg_levels[amrlev]);
+
+        BoxArray nba = amrex::convert(a_grids[amrlev], IntVect(1));
+        m_nodal_overset_mask[amrlev][0]
+            = std::make_unique<iMultiFab>(nba, a_dmap[amrlev], 1, 0);
+
+        auto const& xosm = m_overset_mask[amrlev][0][0]->const_arrays();
+        auto const& yosm = m_overset_mask[amrlev][0][1]->const_arrays();
+        auto const& zosm = m_overset_mask[amrlev][0][2]->const_arrays();
+        auto const& nosm = m_nodal_overset_mask[amrlev][0]->arrays();
+
+        ParallelFor(*m_nodal_overset_mask[amrlev][0],
+            [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+        {
+#if (AMREX_SPACEDIM == 2)
+            bool active = xosm[bno](i-1,j  ,k) && xosm[bno](i  ,j,k)
+                       && yosm[bno](i  ,j-1,k) && yosm[bno](i  ,j,k)
+                       && zosm[bno](i  ,j  ,k);
+#elif (AMREX_SPACEDIM == 3)
+            bool active = xosm[bno](i-1,j  ,k  ) && xosm[bno](i,j,k)
+                       && yosm[bno](i  ,j-1,k  ) && yosm[bno](i,j,k)
+                       && zosm[bno](i  ,j  ,k-1) && zosm[bno](i,j,k);
+#else
+            bool active = xosm[bno](i,j,k) && yosm[bno](i,j,k) && zosm[bno](i,j,k);
+#endif
+            nosm[bno](i,j,k) = active ? 1 : 0;
+        });
+        Gpu::streamSynchronize();
     }
 }
 
@@ -820,11 +860,7 @@ void MLCurlCurl::smooth4 (int amrlev, int mglev, MF& sol, MF const& rhs,
         auto const& bcz = m_bcoefs[amrlev][mglev][2]->const_arrays();
         if (has_osm)
         {
-#if AMREX_SPACEDIM == 2
-            auto const& nosm = m_overset_mask[amrlev][mglev][2]->const_arrays();
-#else
-            Abort("Not implemented for SPACEDIM != 2 right now!");
-#endif
+            auto const& nosm = m_nodal_overset_mask[amrlev][mglev]->const_arrays();
             ParallelFor(nmf, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
             {
                 mlcurlcurl_gs4_alpha_os(i,j,k,ex[bno],ey[bno],ez[bno],
@@ -852,11 +888,7 @@ void MLCurlCurl::smooth4 (int amrlev, int mglev, MF& sol, MF const& rhs,
         auto b = m_beta;
         if (has_osm)
         {
-#if AMREX_SPACEDIM == 2
-            auto const& nosm = m_overset_mask[amrlev][mglev][2]->const_arrays();
-#else
-            Abort("Not implemented for SPACEDIM != 2 right now!");
-#endif
+            auto const& nosm = m_nodal_overset_mask[amrlev][mglev]->const_arrays();
             ParallelFor(nmf, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
             {
                 Array4<Real const> empty;

@@ -188,6 +188,7 @@ private:
     bool m_needs_update = true;
 
     Vector<Vector<Array<std::unique_ptr<iMultiFab>,3>>> m_overset_mask;
+    Vector<Vector<std::unique_ptr<iMultiFab>>> m_nodal_overset_mask;
 };
 
 }
