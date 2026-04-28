@@ -948,7 +948,10 @@ void mlcurlcurl_smooth_1d (int i, int j, int k,
                            GpuArray<Real,AMREX_SPACEDIM> const& adxinv,
                            int color,
                            CurlCurlDirichletInfo const& dinfo, bool valid_x,
-                           int coord)
+                           int coord,
+                           Array4<int const> const& xosm,
+                           Array4<int const> const& yosm,
+                           Array4<int const> const& zosm)
 {
     Real dxx = adxinv[0] * adxinv[0];
 
@@ -956,7 +959,7 @@ void mlcurlcurl_smooth_1d (int i, int j, int k,
 
     if (my_color == color)
     {
-        if (valid_x) {
+        if (valid_x && (!xosm || xosm(i,j,k) != 0)) {
             ex(i,j,k) = rhsx(i,j,k) / beta;
         }
 
@@ -969,13 +972,17 @@ void mlcurlcurl_smooth_1d (int i, int j, int k,
 
             Real gamma = dxx * Real(2.0) + beta;
 
-            Real ccey = cm * ey(i-1,j,k) + cp * ey(i+1,j,k);
-            Real res_y = rhsy(i,j,k) - ( gamma * ey(i,j,k) + ccey );
-            ey(i,j,k) += res_y/gamma;
+            if (!yosm || yosm(i,j,k) != 0) {
+                Real ccey = cm * ey(i-1,j,k) + cp * ey(i+1,j,k);
+                Real res_y = rhsy(i,j,k) - ( gamma * ey(i,j,k) + ccey );
+                ey(i,j,k) += res_y/gamma;
+            }
 
-            Real ccez = cm * ez(i-1,j,k) + cp * ez(i+1,j,k);
-            Real res_z = rhsz(i,j,k) - ( gamma * ez(i,j,k) + ccez );
-            ez(i,j,k) += res_z/gamma;
+            if (!zosm || zosm(i,j,k) != 0) {
+                Real ccez = cm * ez(i-1,j,k) + cp * ez(i+1,j,k);
+                Real res_z = rhsz(i,j,k) - ( gamma * ez(i,j,k) + ccez );
+                ez(i,j,k) += res_z/gamma;
+            }
         }
         else if (coord == 1)
         {
@@ -983,19 +990,23 @@ void mlcurlcurl_smooth_1d (int i, int j, int k,
                 Real cm = dxx * (Real( 0.5)/Real(i) - Real(1.0));
                 Real cp = dxx * (Real(-0.5)/Real(i) - Real(1.0));
 
-                Real gamma = dxx * (Real(1.0)/(Real(i)*Real(i)) + Real(2.0)) + beta;
+                if (!yosm || yosm(i,j,k) != 0) {
+                    Real gamma = dxx * (Real(1.0)/(Real(i)*Real(i)) + Real(2.0)) + beta;
 
-                Real ccey = cm * ey(i-1,j,k) + cp * ey(i+1,j,k);
-                Real res_y = rhsy(i,j,k) - ( gamma * ey(i,j,k) + ccey );
-                ey(i,j,k) += res_y/gamma;
+                    Real ccey = cm * ey(i-1,j,k) + cp * ey(i+1,j,k);
+                    Real res_y = rhsy(i,j,k) - ( gamma * ey(i,j,k) + ccey );
+                    ey(i,j,k) += res_y/gamma;
+                }
 
-                gamma = dxx * Real(2.0) + beta;
+                if (!zosm || zosm(i,j,k) != 0) {
+                    Real gamma = dxx * Real(2.0) + beta;
 
-                Real ccez = cm * ez(i-1,j,k) + cp * ez(i+1,j,k);
-                Real res_z = rhsz(i,j,k) - ( gamma * ez(i,j,k) + ccez );
-                ez(i,j,k) += res_z/gamma;
+                    Real ccez = cm * ez(i-1,j,k) + cp * ez(i+1,j,k);
+                    Real res_z = rhsz(i,j,k) - ( gamma * ez(i,j,k) + ccez );
+                    ez(i,j,k) += res_z/gamma;
+                }
             }
-            if ((i == 0) || (i == 1)) {
+            if (((i == 0) || (i == 1)) && (!zosm || zosm(0,0,0) != 0)) {
                 ez(0,0,0) = (rhsz(0,0,0) + Real(4.0)*dxx*ez(1,0,0))
                     / (beta + Real(4.0)*dxx);
             }
@@ -1009,13 +1020,17 @@ void mlcurlcurl_smooth_1d (int i, int j, int k,
 
             Real gamma = dxx * Real(2.0) + beta;
 
-            Real ccey = cm * ey(i-1,j,k) + cp * ey(i+1,j,k);
-            Real res_y = rhsy(i,j,k) - ( gamma * ey(i,j,k) + ccey );
-            ey(i,j,k) += res_y/gamma;
+            if (!yosm || yosm(i,j,k) != 0) {
+                Real ccey = cm * ey(i-1,j,k) + cp * ey(i+1,j,k);
+                Real res_y = rhsy(i,j,k) - ( gamma * ey(i,j,k) + ccey );
+                ey(i,j,k) += res_y/gamma;
+            }
 
-            Real ccez = cm * ez(i-1,j,k) + cp * ez(i+1,j,k);
-            Real res_z = rhsz(i,j,k) - ( gamma * ez(i,j,k) + ccez );
-            ez(i,j,k) += res_z/gamma;
+            if (!zosm || zosm(i,j,k) != 0) {
+                Real ccez = cm * ez(i-1,j,k) + cp * ez(i+1,j,k);
+                Real res_z = rhsz(i,j,k) - ( gamma * ez(i,j,k) + ccez );
+                ez(i,j,k) += res_z/gamma;
+            }
         }
     }
 }
@@ -1035,7 +1050,10 @@ void mlcurlcurl_smooth_1d (int i, int j, int k,
                            GpuArray<Real,AMREX_SPACEDIM> const& adxinv,
                            int color,
                            CurlCurlDirichletInfo const& dinfo, bool valid_x,
-                           int coord)
+                           int coord,
+                           Array4<int const> const& xosm,
+                           Array4<int const> const& yosm,
+                           Array4<int const> const& zosm)
 {
     Real dxx = adxinv[0] * adxinv[0];
 
@@ -1043,7 +1061,7 @@ void mlcurlcurl_smooth_1d (int i, int j, int k,
 
     if (my_color == color)
     {
-        if (valid_x) {
+        if (valid_x && (!xosm || xosm(i,j,k) != 0)) {
             ex(i,j,k) = rhsx(i,j,k) / betax(i,j,k);
         }
 
@@ -1054,15 +1072,19 @@ void mlcurlcurl_smooth_1d (int i, int j, int k,
             Real cm = -dxx;
             Real cp = -dxx;
 
-            Real gamma_y = dxx * Real(2.0) + betay(i,j,k);
-            Real ccey = cm * ey(i-1,j,k) + cp * ey(i+1,j,k);
-            Real res_y = rhsy(i,j,k) - ( gamma_y * ey(i,j,k) + ccey );
-            ey(i,j,k) += res_y/gamma_y;
+            if (!yosm || yosm(i,j,k) != 0) {
+                Real gamma_y = dxx * Real(2.0) + betay(i,j,k);
+                Real ccey = cm * ey(i-1,j,k) + cp * ey(i+1,j,k);
+                Real res_y = rhsy(i,j,k) - ( gamma_y * ey(i,j,k) + ccey );
+                ey(i,j,k) += res_y/gamma_y;
+            }
 
-            Real gamma_z = dxx * Real(2.0) + betaz(i,j,k);
-            Real ccez = cm * ez(i-1,j,k) + cp * ez(i+1,j,k);
-            Real res_z = rhsz(i,j,k) - ( gamma_z * ez(i,j,k) + ccez );
-            ez(i,j,k) += res_z/gamma_z;
+            if (!zosm || zosm(i,j,k) != 0) {
+                Real gamma_z = dxx * Real(2.0) + betaz(i,j,k);
+                Real ccez = cm * ez(i-1,j,k) + cp * ez(i+1,j,k);
+                Real res_z = rhsz(i,j,k) - ( gamma_z * ez(i,j,k) + ccez );
+                ez(i,j,k) += res_z/gamma_z;
+            }
         }
         else if (coord == 1)
         {
@@ -1070,19 +1092,23 @@ void mlcurlcurl_smooth_1d (int i, int j, int k,
                 Real cm = dxx * (Real( 0.5)/Real(i) - Real(1.0));
                 Real cp = dxx * (Real(-0.5)/Real(i) - Real(1.0));
 
-                Real gamma = dxx * (Real(1.0)/(Real(i)*Real(i)) + Real(2.0)) + betay(i,j,k);
+                if (!yosm || yosm(i,j,k) != 0) {
+                    Real gamma = dxx * (Real(1.0)/(Real(i)*Real(i)) + Real(2.0)) + betay(i,j,k);
 
-                Real ccey = cm * ey(i-1,j,k) + cp * ey(i+1,j,k);
-                Real res_y = rhsy(i,j,k) - ( gamma * ey(i,j,k) + ccey );
-                ey(i,j,k) += res_y/gamma;
+                    Real ccey = cm * ey(i-1,j,k) + cp * ey(i+1,j,k);
+                    Real res_y = rhsy(i,j,k) - ( gamma * ey(i,j,k) + ccey );
+                    ey(i,j,k) += res_y/gamma;
+                }
 
-                gamma = dxx * Real(2.0) + betaz(i,j,k);
+                if (!zosm || zosm(i,j,k) != 0) {
+                    Real gamma = dxx * Real(2.0) + betaz(i,j,k);
 
-                Real ccez = cm * ez(i-1,j,k) + cp * ez(i+1,j,k);
-                Real res_z = rhsz(i,j,k) - ( gamma * ez(i,j,k) + ccez );
-                ez(i,j,k) += res_z/gamma;
+                    Real ccez = cm * ez(i-1,j,k) + cp * ez(i+1,j,k);
+                    Real res_z = rhsz(i,j,k) - ( gamma * ez(i,j,k) + ccez );
+                    ez(i,j,k) += res_z/gamma;
+                }
             }
-            if ((i == 0) || (i == 1)) {
+            if (((i == 0) || (i == 1)) && (!zosm || zosm(0,0,0) != 0)) {
                 ez(0,0,0) = (rhsz(0,0,0) + Real(4.0)*dxx*ez(1,0,0)) / (betaz(0,0,0) + Real(4.0)*dxx);
             }
         }
@@ -1093,15 +1119,19 @@ void mlcurlcurl_smooth_1d (int i, int j, int k,
             Real cm = dxx * (Real( 1.0)/Real(i) - Real(1.0));
             Real cp = dxx * (Real(-1.0)/Real(i) - Real(1.0));
 
-            Real gamma_y = dxx * Real(2.0) + betay(i,j,k);
-            Real ccey = cm * ey(i-1,j,k) + cp * ey(i+1,j,k);
-            Real res_y = rhsy(i,j,k) - ( gamma_y * ey(i,j,k) + ccey );
-            ey(i,j,k) += res_y/gamma_y;
+            if (!yosm || yosm(i,j,k) != 0) {
+                Real gamma_y = dxx * Real(2.0) + betay(i,j,k);
+                Real ccey = cm * ey(i-1,j,k) + cp * ey(i+1,j,k);
+                Real res_y = rhsy(i,j,k) - ( gamma_y * ey(i,j,k) + ccey );
+                ey(i,j,k) += res_y/gamma_y;
+            }
 
-            Real gamma_z = dxx * Real(2.0) + betaz(i,j,k);
-            Real ccez = cm * ez(i-1,j,k) + cp * ez(i+1,j,k);
-            Real res_z = rhsz(i,j,k) - ( gamma_z * ez(i,j,k) + ccez );
-            ez(i,j,k) += res_z/gamma_z;
+            if (!zosm || zosm(i,j,k) != 0) {
+                Real gamma_z = dxx * Real(2.0) + betaz(i,j,k);
+                Real ccez = cm * ez(i-1,j,k) + cp * ez(i+1,j,k);
+                Real res_z = rhsz(i,j,k) - ( gamma_z * ez(i,j,k) + ccez );
+                ez(i,j,k) += res_z/gamma_z;
+            }
         }
     }
 }
@@ -1122,23 +1152,27 @@ void mlcurlcurl_smooth_1d_alpha_beta (int i, int j, int k,
                                       CurlCurlDirichletInfo const& dinfo, bool valid_x,
                                       int coord,
                                       Array4<Real const> const& alphay,
-                                      Array4<Real const> const& alphaz)
+                                      Array4<Real const> const& alphaz,
+                                      Array4<int const> const& xosm,
+                                      Array4<int const> const& yosm,
+                                      Array4<int const> const& zosm)
 {
     Real dxx = adxinv[0] * adxinv[0];
 
     int my_color = i%2;
     if (my_color != color) { return; }
 
-    if (valid_x) {
+    if (valid_x && (!xosm || xosm(i,j,k) != 0)) {
         ex(i,j,k) = rhsx(i,j,k) / betax(i,j,k);
     }
 
     auto cartesian_update = [&] (Array4<Real> const& comp,
                                  Array4<Real const> const& rhs,
                                  Array4<Real const> const& beta,
-                                 Array4<Real const> const& alpha)
+                                 Array4<Real const> const& alpha,
+                                 Array4<int const> const& osm)
     {
-        if (dinfo.is_dirichlet_node(i,j,k)) { return; }
+        if (dinfo.is_dirichlet_node(i,j,k) || (osm && osm(i,j,k) == 0)) { return; }
         Real alpha_lo = alpha(i-1,j,k);
         Real alpha_hi = alpha(i  ,j,k);
         Real cm = -dxx * alpha_lo;
@@ -1151,7 +1185,8 @@ void mlcurlcurl_smooth_1d_alpha_beta (int i, int j, int k,
 
     auto cylindrical_y = [&] ()
     {
-        if ((i > 0) && !dinfo.is_dirichlet_node(i,j,k)) {
+        if ((i > 0) && !dinfo.is_dirichlet_node(i,j,k)
+            && (!yosm || yosm(i,j,k) != 0)) {
             Real ri = Real(i);
             Real rimh = ri - Real(0.5);
             Real riph = ri + Real(0.5);
@@ -1169,7 +1204,8 @@ void mlcurlcurl_smooth_1d_alpha_beta (int i, int j, int k,
 
     auto cylindrical_z = [&] ()
     {
-        if ((i > 0) && !dinfo.is_dirichlet_node(i,j,k)) {
+        if ((i > 0) && !dinfo.is_dirichlet_node(i,j,k)
+            && (!zosm || zosm(i,j,k) != 0)) {
             Real ri = Real(i);
             Real alpha_lo = alphay(i-1,j,k);
             Real alpha_hi = alphay(i  ,j,k);
@@ -1182,7 +1218,7 @@ void mlcurlcurl_smooth_1d_alpha_beta (int i, int j, int k,
             Real res_z = rhsz(i,j,k) - (gamma * ez(i,j,k) + ccez);
             ez(i,j,k) += res_z / gamma;
         }
-        if ((i == 0) || (i == 1)) {
+        if (((i == 0) || (i == 1)) && (!zosm || zosm(0,j,k) != 0)) {
             Real alpha_axis = alphay(0,j,k);
             Real gamma = betaz(0,j,k) + Real(4.0)*dxx*alpha_axis;
             Real num = rhsz(0,j,k) + Real(4.0)*dxx*alpha_axis * ez(1,j,k);
@@ -1193,9 +1229,11 @@ void mlcurlcurl_smooth_1d_alpha_beta (int i, int j, int k,
     auto spherical_update = [&] (Array4<Real> const& comp,
                                  Array4<Real const> const& rhs,
                                  Array4<Real const> const& beta,
-                                 Array4<Real const> const& alpha)
+                                 Array4<Real const> const& alpha,
+                                 Array4<int const> const& osm)
     {
-        if (i == 0 || dinfo.is_dirichlet_node(i,j,k)) { return; }
+        if (i == 0 || dinfo.is_dirichlet_node(i,j,k)
+            || (osm && osm(i,j,k) == 0)) { return; }
         Real ri = Real(i);
         Real alpha_lo = alpha(i-1,j,k);
         Real alpha_hi = alpha(i  ,j,k);
@@ -1208,14 +1246,14 @@ void mlcurlcurl_smooth_1d_alpha_beta (int i, int j, int k,
     };
 
     if (coord == 0) {
-        cartesian_update(ey, rhsy, betay, alphaz);
-        cartesian_update(ez, rhsz, betaz, alphay);
+        cartesian_update(ey, rhsy, betay, alphaz, yosm);
+        cartesian_update(ez, rhsz, betaz, alphay, zosm);
     } else if (coord == 1) {
         cylindrical_y();
         cylindrical_z();
     } else {
-        spherical_update(ey, rhsy, betay, alphaz);
-        spherical_update(ez, rhsz, betaz, alphay);
+        spherical_update(ey, rhsy, betay, alphaz, yosm);
+        spherical_update(ez, rhsz, betaz, alphay, zosm);
     }
 }
 
@@ -1233,22 +1271,26 @@ void mlcurlcurl_smooth_1d_alpha (int i, int j, int k,
                                  CurlCurlDirichletInfo const& dinfo, bool valid_x,
                                  int coord,
                                  Array4<Real const> const& alphay,
-                                 Array4<Real const> const& alphaz)
+                                 Array4<Real const> const& alphaz,
+                                 Array4<int const> const& xosm,
+                                 Array4<int const> const& yosm,
+                                 Array4<int const> const& zosm)
 {
     Real dxx = adxinv[0] * adxinv[0];
 
     int my_color = i%2;
     if (my_color != color) { return; }
 
-    if (valid_x) {
+    if (valid_x && (!xosm || xosm(i,j,k) != 0)) {
         ex(i,j,k) = rhsx(i,j,k) / beta;
     }
 
     auto cartesian_update = [&] (Array4<Real> const& comp,
                                  Array4<Real const> const& rhs,
-                                 Array4<Real const> const& alpha)
+                                 Array4<Real const> const& alpha,
+                                 Array4<int const> const& osm)
     {
-        if (dinfo.is_dirichlet_node(i,j,k)) { return; }
+        if (dinfo.is_dirichlet_node(i,j,k) || (osm && osm(i,j,k) == 0)) { return; }
         Real alpha_lo = alpha(i-1,j,k);
         Real alpha_hi = alpha(i  ,j,k);
         Real cm = -dxx * alpha_lo;
@@ -1261,7 +1303,8 @@ void mlcurlcurl_smooth_1d_alpha (int i, int j, int k,
 
     auto cylindrical_y = [&] ()
     {
-        if ((i > 0) && !dinfo.is_dirichlet_node(i,j,k)) {
+        if ((i > 0) && !dinfo.is_dirichlet_node(i,j,k)
+            && (!yosm || yosm(i,j,k) != 0)) {
             Real ri = Real(i);
             Real rimh = ri - Real(0.5);
             Real riph = ri + Real(0.5);
@@ -1278,7 +1321,8 @@ void mlcurlcurl_smooth_1d_alpha (int i, int j, int k,
 
     auto cylindrical_z = [&] ()
     {
-        if ((i > 0) && !dinfo.is_dirichlet_node(i,j,k)) {
+        if ((i > 0) && !dinfo.is_dirichlet_node(i,j,k)
+            && (!zosm || zosm(i,j,k) != 0)) {
             Real ri = Real(i);
             Real alpha_lo = alphay(i-1,j,k);
             Real alpha_hi = alphay(i  ,j,k);
@@ -1290,7 +1334,7 @@ void mlcurlcurl_smooth_1d_alpha (int i, int j, int k,
             Real res_z = rhsz(i,j,k) - (gamma * ez(i,j,k) + ccez);
             ez(i,j,k) += res_z / gamma;
         }
-        if ((i == 0) || (i == 1)) {
+        if (((i == 0) || (i == 1)) && (!zosm || zosm(0,j,k) != 0)) {
             Real alpha_axis = alphay(0,j,k);
             Real gamma = beta + Real(4.0)*dxx*alpha_axis;
             Real num = rhsz(0,j,k) + Real(4.0)*dxx*alpha_axis * ez(1,j,k);
@@ -1300,9 +1344,11 @@ void mlcurlcurl_smooth_1d_alpha (int i, int j, int k,
 
     auto spherical_update = [&] (Array4<Real> const& comp,
                                  Array4<Real const> const& rhs,
-                                 Array4<Real const> const& alpha)
+                                 Array4<Real const> const& alpha,
+                                 Array4<int const> const& osm)
     {
-        if (i == 0 || dinfo.is_dirichlet_node(i,j,k)) { return; }
+        if (i == 0 || dinfo.is_dirichlet_node(i,j,k)
+            || (osm && osm(i,j,k) == 0)) { return; }
         Real ri = Real(i);
         Real alpha_lo = alpha(i-1,j,k);
         Real alpha_hi = alpha(i  ,j,k);
@@ -1315,14 +1361,14 @@ void mlcurlcurl_smooth_1d_alpha (int i, int j, int k,
     };
 
     if (coord == 0) {
-        cartesian_update(ey, rhsy, alphaz);
-        cartesian_update(ez, rhsz, alphay);
+        cartesian_update(ey, rhsy, alphaz, yosm);
+        cartesian_update(ez, rhsz, alphay, zosm);
     } else if (coord == 1) {
         cylindrical_y();
         cylindrical_z();
     } else {
-        spherical_update(ey, rhsy, alphaz);
-        spherical_update(ez, rhsz, alphay);
+        spherical_update(ey, rhsy, alphaz, yosm);
+        spherical_update(ez, rhsz, alphay, zosm);
     }
 }
 

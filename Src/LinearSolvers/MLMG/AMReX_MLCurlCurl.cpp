@@ -728,6 +728,7 @@ void MLCurlCurl::smooth1D (int amrlev, int mglev, MF& sol, MF const& rhs,
 
     bool const has_beta = (m_bcoefs[amrlev][mglev][0] != nullptr);
     bool const has_alpha = (m_acoefs[amrlev][mglev][0] != nullptr);
+    bool const has_osm = (m_overset_mask[amrlev][mglev][0] != nullptr);
 
     if (has_alpha && has_beta) {
         auto const& acy = m_acoefs[amrlev][mglev][1]->const_arrays();
@@ -735,72 +736,116 @@ void MLCurlCurl::smooth1D (int amrlev, int mglev, MF& sol, MF const& rhs,
         auto const& bcx = m_bcoefs[amrlev][mglev][0]->const_arrays();
         auto const& bcy = m_bcoefs[amrlev][mglev][1]->const_arrays();
         auto const& bcz = m_bcoefs[amrlev][mglev][2]->const_arrays();
-        ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
-        {
-            bool valid_x = i <= xhi; // x is cell-centered, not nodal
-            mlcurlcurl_smooth_1d_alpha_beta(i,j,k,ex[bno],ey[bno],ez[bno],
-                                            rhsx[bno],rhsy[bno],rhsz[bno],
-                                            bcx[bno],bcy[bno],bcz[bno],
-                                            dxinv,color,dinfo,valid_x,coord,
-                                            acy[bno],acz[bno]);
-        });
+        if (has_osm) {
+            auto const& xosm = m_overset_mask[amrlev][mglev][0]->const_arrays();
+            auto const& yosm = m_overset_mask[amrlev][mglev][1]->const_arrays();
+            auto const& zosm = m_overset_mask[amrlev][mglev][2]->const_arrays();
+            ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
+            {
+                bool valid_x = i <= xhi; // x is cell-centered, not nodal
+                mlcurlcurl_smooth_1d_alpha_beta(i,j,k,ex[bno],ey[bno],ez[bno],
+                                                rhsx[bno],rhsy[bno],rhsz[bno],
+                                                bcx[bno],bcy[bno],bcz[bno],
+                                                dxinv,color,dinfo,valid_x,coord,
+                                                acy[bno],acz[bno],
+                                                xosm[bno],yosm[bno],zosm[bno]);
+            });
+        } else {
+            ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
+            {
+                bool valid_x = i <= xhi; // x is cell-centered, not nodal
+                Array4<int const> empty;
+                mlcurlcurl_smooth_1d_alpha_beta(i,j,k,ex[bno],ey[bno],ez[bno],
+                                                rhsx[bno],rhsy[bno],rhsz[bno],
+                                                bcx[bno],bcy[bno],bcz[bno],
+                                                dxinv,color,dinfo,valid_x,coord,
+                                                acy[bno],acz[bno],
+                                                empty,empty,empty);
+            });
+        }
     } else if (has_alpha && !has_beta) {
         auto const& acy = m_acoefs[amrlev][mglev][1]->const_arrays();
         auto const& acz = m_acoefs[amrlev][mglev][2]->const_arrays();
-        ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
-        {
-            bool valid_x = i <= xhi; // x is cell-centered, not nodal
-            mlcurlcurl_smooth_1d_alpha(i,j,k,ex[bno],ey[bno],ez[bno],
-                                       rhsx[bno],rhsy[bno],rhsz[bno],
-                                       b,
-                                       dxinv,color,dinfo,valid_x,coord,
-                                       acy[bno],acz[bno]);
-        });
+        if (has_osm) {
+            auto const& xosm = m_overset_mask[amrlev][mglev][0]->const_arrays();
+            auto const& yosm = m_overset_mask[amrlev][mglev][1]->const_arrays();
+            auto const& zosm = m_overset_mask[amrlev][mglev][2]->const_arrays();
+            ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
+            {
+                bool valid_x = i <= xhi; // x is cell-centered, not nodal
+                mlcurlcurl_smooth_1d_alpha(i,j,k,ex[bno],ey[bno],ez[bno],
+                                           rhsx[bno],rhsy[bno],rhsz[bno],
+                                           b,
+                                           dxinv,color,dinfo,valid_x,coord,
+                                           acy[bno],acz[bno],
+                                           xosm[bno],yosm[bno],zosm[bno]);
+            });
+        } else {
+            ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
+            {
+                bool valid_x = i <= xhi; // x is cell-centered, not nodal
+                Array4<int const> empty;
+                mlcurlcurl_smooth_1d_alpha(i,j,k,ex[bno],ey[bno],ez[bno],
+                                           rhsx[bno],rhsy[bno],rhsz[bno],
+                                           b,
+                                           dxinv,color,dinfo,valid_x,coord,
+                                           acy[bno],acz[bno],
+                                           empty,empty,empty);
+            });
+        }
     } else if (!has_alpha && has_beta) {
         auto const& bcx = m_bcoefs[amrlev][mglev][0]->const_arrays();
         auto const& bcy = m_bcoefs[amrlev][mglev][1]->const_arrays();
         auto const& bcz = m_bcoefs[amrlev][mglev][2]->const_arrays();
-        ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
-        {
-            bool valid_x = i <= xhi;
-            mlcurlcurl_smooth_1d_alpha_beta(i,j,k,ex[bno],ey[bno],ez[bno],
-                                            rhsx[bno],rhsy[bno],rhsz[bno],
-                                            bcx[bno],bcy[bno],bcz[bno],
-                                            dxinv,color,dinfo,valid_x,coord,
-                                            acy[bno],acz[bno]);
-        });
-    } else if (has_alpha && !has_beta) {
-        auto const& acy = m_acoefs[amrlev][mglev][1]->const_arrays();
-        auto const& acz = m_acoefs[amrlev][mglev][2]->const_arrays();
-        ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
-        {
-            bool valid_x = i <= xhi; // x is cell-centered, not nodal
-            mlcurlcurl_smooth_1d_alpha(i,j,k,ex[bno],ey[bno],ez[bno],
-                                       rhsx[bno],rhsy[bno],rhsz[bno],
-                                       b,
-                                       dxinv,color,dinfo,valid_x,coord,
-                                       acy[bno],acz[bno]);
-        });
-    } else if (!has_alpha && has_beta) {
-        auto const& bcx = m_bcoefs[amrlev][mglev][0]->const_arrays();
-        auto const& bcy = m_bcoefs[amrlev][mglev][1]->const_arrays();
-        auto const& bcz = m_bcoefs[amrlev][mglev][2]->const_arrays();
-        ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
-        {
-            bool valid_x = i <= xhi; // x is cell-centered, not nodal
-            mlcurlcurl_smooth_1d(i,j,k,ex[bno],ey[bno],ez[bno],
-                                 rhsx[bno],rhsy[bno],rhsz[bno],
-                                 bcx[bno],bcy[bno],bcz[bno],
-                                 adxinv,color,dinfo,valid_x,coord);
-        });
+        if (has_osm) {
+            auto const& xosm = m_overset_mask[amrlev][mglev][0]->const_arrays();
+            auto const& yosm = m_overset_mask[amrlev][mglev][1]->const_arrays();
+            auto const& zosm = m_overset_mask[amrlev][mglev][2]->const_arrays();
+            ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
+            {
+                bool valid_x = i <= xhi; // x is cell-centered, not nodal
+                mlcurlcurl_smooth_1d(i,j,k,ex[bno],ey[bno],ez[bno],
+                                     rhsx[bno],rhsy[bno],rhsz[bno],
+                                     bcx[bno],bcy[bno],bcz[bno],
+                                     adxinv,color,dinfo,valid_x,coord,
+                                     xosm[bno],yosm[bno],zosm[bno]);
+            });
+        } else {
+            ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
+            {
+                bool valid_x = i <= xhi; // x is cell-centered, not nodal
+                Array4<int const> empty;
+                mlcurlcurl_smooth_1d(i,j,k,ex[bno],ey[bno],ez[bno],
+                                     rhsx[bno],rhsy[bno],rhsz[bno],
+                                     bcx[bno],bcy[bno],bcz[bno],
+                                     adxinv,color,dinfo,valid_x,coord,
+                                     empty,empty,empty);
+            });
+        }
     } else {
-        ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
-        {
-            bool valid_x = i <= xhi; // x is cell-centered, not nodal
-            mlcurlcurl_smooth_1d(i,j,k,ex[bno],ey[bno],ez[bno],
-                                 rhsx[bno],rhsy[bno],rhsz[bno],
-                                 b,adxinv,color,dinfo,valid_x,coord);
-        });
+        if (has_osm) {
+            auto const& xosm = m_overset_mask[amrlev][mglev][0]->const_arrays();
+            auto const& yosm = m_overset_mask[amrlev][mglev][1]->const_arrays();
+            auto const& zosm = m_overset_mask[amrlev][mglev][2]->const_arrays();
+            ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
+            {
+                bool valid_x = i <= xhi; // x is cell-centered, not nodal
+                mlcurlcurl_smooth_1d(i,j,k,ex[bno],ey[bno],ez[bno],
+                                     rhsx[bno],rhsy[bno],rhsz[bno],
+                                     b,adxinv,color,dinfo,valid_x,coord,
+                                     xosm[bno],yosm[bno],zosm[bno]);
+            });
+        } else {
+            ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
+            {
+                bool valid_x = i <= xhi; // x is cell-centered, not nodal
+                Array4<int const> empty;
+                mlcurlcurl_smooth_1d(i,j,k,ex[bno],ey[bno],ez[bno],
+                                     rhsx[bno],rhsy[bno],rhsz[bno],
+                                     b,adxinv,color,dinfo,valid_x,coord,
+                                     empty,empty,empty);
+            });
+        }
     }
     if (!Gpu::inNoSyncRegion()) {
         Gpu::streamSynchronize();
