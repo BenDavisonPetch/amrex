@@ -7,7 +7,55 @@
 #include <AMReX_MLMG.H>
 #include <AMReX_ParmParse.H>
 
+#include <algorithm>
+#include <cctype>
+#include <memory>
+#include <string>
+
 using namespace amrex;
+
+namespace {
+
+void zeroAtMasked (Array<MultiFab,3>& mf, Array<iMultiFab,3> const& mask)
+{
+    for (int idim = 0; idim < 3; ++idim) {
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(mf[idim], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            const Box& bx = mfi.tilebox();
+            auto const& a = mf[idim].array(mfi);
+            auto const& m = mask[idim].const_array(mfi);
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                if (m(i,j,k) == 0) { a(i,j,k) = Real(0); }
+            });
+        }
+    }
+}
+
+void pinSolutionToExact (Array<MultiFab,3>& sol,
+                         Array<MultiFab,3> const& exact,
+                         Array<iMultiFab,3> const& mask)
+{
+    for (int idim = 0; idim < 3; ++idim) {
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+        for (MFIter mfi(sol[idim], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+            const Box& bx = mfi.tilebox();
+            auto const& s = sol[idim].array(mfi);
+            auto const& e = exact[idim].const_array(mfi);
+            auto const& m = mask[idim].const_array(mfi);
+            ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+            {
+                if (m(i,j,k) == 0) { s(i,j,k) = e(i,j,k); }
+            });
+        }
+    }
+}
+
+}
 
 MyTest::MyTest ()
 {
@@ -26,7 +74,22 @@ MyTest::solve ()
     info.setConsolidation(consolidation);
     info.setMaxCoarseningLevel(max_coarsening_level);
 
-    MLCurlCurl mlcc({geom}, {grids}, {dmap}, info, coord);
+    std::unique_ptr<MLCurlCurl> mlcc_ptr;
+    if (overset_mask) {
+        mlcc_ptr = std::make_unique<MLCurlCurl>();
+        Array<const iMultiFab*, 3> osm_ptrs{&overset_mask_mf[0],
+                                            &overset_mask_mf[1],
+                                            &overset_mask_mf[2]};
+        mlcc_ptr->define({geom}, {grids}, {dmap},
+                         Vector<Array<const iMultiFab*, 3>>{osm_ptrs},
+                         info, coord);
+    } else {
+        mlcc_ptr = std::make_unique<MLCurlCurl>(Vector<Geometry>{geom},
+                                                Vector<BoxArray>{grids},
+                                                Vector<DistributionMapping>{dmap},
+                                                info, coord);
+    }
+    auto& mlcc = *mlcc_ptr;
 
     mlcc.setDomainBC({AMREX_D_DECL(LinOpBCType::symmetry,
                                    LinOpBCType::Dirichlet,
@@ -69,11 +132,18 @@ MyTest::solve ()
             MultiFab::Copy(residual[idim], rhs[idim], 0, 0, 1, 0);
         }
         mlmg.apply({&ax_exact}, {&exact});
-        amrex::Print() << "  Residual norms (b - A x_exact), expect O(dx^2):\n";
+        amrex::Print() << "  Residual norms (b - A x_exact), expect O(dx^2)";
+        if (overset_mask) {
+            amrex::Print() << " (overset: masked DOFs excluded)";
+        }
+        amrex::Print() << ":\n";
         for (int idim = 0; idim < 3; ++idim) {
             MultiFab::Subtract(residual[idim], ax_exact[idim], 0, 0, 1, 0);
         }
         mlcc.setDirichletNodesToZero(0,0,residual);
+        if (overset_mask) {
+            zeroAtMasked(residual, overset_mask_mf);
+        }
         for (int idim = 0; idim < 3; ++idim) {
             auto r0 = residual[idim].norminf();
             auto r1 = residual[idim].norm1(0, geom.periodicity()) * dvol;
@@ -85,6 +155,9 @@ MyTest::solve ()
 
     for (auto& mf : solution) {
         mf.setVal(Real(0));
+    }
+    if (overset_mask) {
+        pinSolutionToExact(solution, exact, overset_mask_mf);
     }
 
     Real tol_rel;
@@ -111,13 +184,21 @@ MyTest::solve ()
     amrex::Print() << "  Number of cells: " << n_cell << '\n';
     for (int idim = 0; idim < 3; ++idim) {
         MultiFab::Subtract(solution[idim], exact[idim], 0, 0, 1, 0);
+    }
+    if (overset_mask) {
+        zeroAtMasked(solution, overset_mask_mf);
+    }
+    for (int idim = 0; idim < 3; ++idim) {
         auto e0 = solution[idim].norminf();
         auto e1 = solution[idim].norm1(0,geom.periodicity());
         e1 *= dvol;
         auto e2 = solution[idim].norm2(0,geom.periodicity());
         e2 *= std::sqrt(dvol);
-        amrex::Print() << "  " << names[idim] << " errors (max, L1, L2): "
-                       << e0 << " " << e1 << " " << e2 << '\n';
+        amrex::Print() << "  " << names[idim] << " errors (max, L1, L2)";
+        if (overset_mask) {
+            amrex::Print() << " (overset: masked DOFs excluded)";
+        }
+        amrex::Print() << ": " << e0 << " " << e1 << " " << e2 << '\n';
     }
 }
 
@@ -151,6 +232,22 @@ MyTest::readParameters ()
     pp.query("alpha", alpha);
     pp.query("variable_beta", variable_beta);
     pp.query("variable_alpha", variable_alpha);
+
+    pp.query("overset_mask", overset_mask);
+    if (overset_mask) {
+        std::string pat = "blob";
+        pp.query("overset_pattern", pat);
+        std::transform(pat.begin(), pat.end(), pat.begin(),
+                       [](unsigned char c){ return std::tolower(c); });
+        if      (pat == "none")  { overset_pattern = OversetPattern::None;  }
+        else if (pat == "point") { overset_pattern = OversetPattern::Point; }
+        else if (pat == "box")   { overset_pattern = OversetPattern::Box;   }
+        else if (pat == "blob")  { overset_pattern = OversetPattern::Blob;  }
+        else {
+            amrex::Abort("Unknown overset_pattern '" + pat +
+                         "': expected none|point|box|blob");
+        }
+    }
 }
 
 void
@@ -181,6 +278,9 @@ MyTest::initData ()
         solution[idim].define(ba,dmap,1,1);
         exact   [idim].define(ba,dmap,1,1);
         rhs     [idim].define(ba,dmap,1,0);
+        if (overset_mask) {
+            overset_mask_mf[idim].define(ba, dmap, 1, 0);
+        }
     }
     if (variable_alpha) {
         alpha_node.define(amrex::convert(grids,IntVect(1)), dmap,1,0);
@@ -190,5 +290,10 @@ MyTest::initData ()
 
     for (int idim = 0; idim < 3; ++idim) {
         exact[idim].LocalCopy(solution[idim], 0, 0, 1, IntVect(1));
+    }
+
+    if (overset_mask) {
+        populateOversetMask();
+        pinSolutionToExact(solution, exact, overset_mask_mf);
     }
 }

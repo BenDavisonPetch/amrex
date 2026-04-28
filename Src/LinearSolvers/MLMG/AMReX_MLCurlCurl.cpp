@@ -70,18 +70,22 @@ void MLCurlCurl::define (const Vector<Geometry>& a_geom,
                                      "Haven't implemented MG with overset masks yet soz");
 
     // Define overset mask multifabs and copy over
-    m_overset_mask.resize(m_num_amr_levels);
-    for (int amrlev = 0; amrlev < m_num_amr_levels; ++amrlev) {
+    auto namrlevs = static_cast<int>(a_geom.size());
+    m_overset_mask.resize(namrlevs);
+    for (int amrlev = 0; amrlev < namrlevs; ++amrlev) {
         constexpr int ng_osm = 0; // actually might need to be 2 for cf boundaries?? might not need to use osm for those tho
         m_overset_mask[amrlev].push_back({std::make_unique<iMultiFab>(amrex::convert(a_grids[amrlev], m_etype[0]),
                                                                          a_dmap[amrlev], 1, ng_osm),
                                             std::make_unique<iMultiFab>(amrex::convert(a_grids[amrlev], m_etype[1]),
                                                                          a_dmap[amrlev], 1, ng_osm),
-                                                std::make_unique<iMultiFab>(amrex::convert(a_grids[amrlev], m_etype[1]),
+                                                std::make_unique<iMultiFab>(amrex::convert(a_grids[amrlev], m_etype[2]),
                                                                          a_dmap[amrlev], 1, ng_osm),});
         for (int idim = 0; idim < 3; ++idim) {
+            AMREX_ALWAYS_ASSERT_WITH_MESSAGE(
+                a_overset_mask[amrlev][idim]->ixType() == IndexType(m_etype[idim]),
+                "MLCurlCurl: overset mask index type must match edge centering");
             iMultiFab::Copy(*(m_overset_mask[amrlev][0][idim]), *a_overset_mask[amrlev][idim], 0, 0, 1, 0);
-        }                                                                 
+        }
         if (amrlev > 1) {
             AMREX_ALWAYS_ASSERT(amrex::refine(a_geom[amrlev-1].Domain(),2)
                                 == a_geom[amrlev].Domain());

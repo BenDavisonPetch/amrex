@@ -10,6 +10,8 @@ bottom_verbose = 0
 alpha = 1.0
 beta_factor = 0.01
 
+overset_pattern = blob   # none | point | box | blob
+
 amrex.fpe_trap_invalid=1
 amrex.fpe_trap_zero=1
 amrex.fpe_trap_overflow=1

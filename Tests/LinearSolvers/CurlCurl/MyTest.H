@@ -2,10 +2,13 @@
 #define MY_TEST_H_
 
 #include <AMReX_MultiFab.H>
+#include <AMReX_iMultiFab.H>
 
 class MyTest
 {
 public:
+
+    enum class OversetPattern { None, Point, Box, Blob };
 
     MyTest ();
 
@@ -13,6 +16,7 @@ public:
 
 // public for cuda
     void initProb ();
+    void populateOversetMask ();
 
 private:
 
@@ -44,12 +48,15 @@ private:
     amrex::Array<amrex::MultiFab,3> exact;
     amrex::Array<amrex::MultiFab,3> rhs;
     amrex::MultiFab alpha_node;
+    amrex::Array<amrex::iMultiFab,3> overset_mask_mf;
 
     amrex::Real beta_factor = 1.e-2;
     amrex::Real alpha = 1.0;
     amrex::Real beta = 1.0;
     bool variable_beta = false;
     bool variable_alpha = false;
+    bool overset_mask = false;
+    OversetPattern overset_pattern = OversetPattern::Blob;
 };
 
 #endif

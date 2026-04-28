@@ -2,6 +2,8 @@
 
 #include "MyTest.H"
 
+#include <AMReX_iMultiFab.H>
+
 using namespace amrex;
 
 enum class CoordID { Cartesian, Cyl1D, Cyl2D, Sph1D };
@@ -62,5 +64,139 @@ MyTest::initProb ()
                 actual_init_prob(i,j,k,rhsfab,solfab,prob_lo,dx,a,b,alphafab);
             }
         });
+    }
+}
+
+void
+MyTest::populateOversetMask ()
+{
+    const auto prob_lo = geom.ProbLoArray();
+    const auto prob_hi = geom.ProbHiArray();
+    const auto dx      = geom.CellSizeArray();
+    const Box& domain  = geom.Domain();
+
+    for (int idim = 0; idim < 3; ++idim) {
+        overset_mask_mf[idim].setVal(1);
+    }
+
+    if (overset_pattern == OversetPattern::None) {
+        return;
+    }
+
+    if (overset_pattern == OversetPattern::Point) {
+        IntVect p(0);
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            p[d] = domain.smallEnd(d) + n_cell/2;
+        }
+        for (int idim = 0; idim < 3; ++idim) {
+            for (MFIter mfi(overset_mask_mf[idim]); mfi.isValid(); ++mfi) {
+                if (mfi.validbox().contains(p)) {
+                    auto const& m = overset_mask_mf[idim].array(mfi);
+                    const Box pbx(p, p);
+                    ParallelFor(pbx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                    {
+                        m(i,j,k) = 0;
+                    });
+                }
+            }
+        }
+    } else if (overset_pattern == OversetPattern::Box) {
+        const Box mask_region = amrex::grow(domain, -(n_cell/4));
+        for (int idim = 0; idim < 3; ++idim) {
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(overset_mask_mf[idim], TilingIfNotGPU());
+                 mfi.isValid(); ++mfi)
+            {
+                const Box& bx = mfi.tilebox();
+                auto const& m = overset_mask_mf[idim].array(mfi);
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                {
+                    if (mask_region.contains(IntVect(AMREX_D_DECL(i,j,k)))) {
+                        m(i,j,k) = 0;
+                    }
+                });
+            }
+        }
+    } else { // Blob
+        const Real Lx = prob_hi[0] - prob_lo[0];
+        const Real cx = prob_lo[0] + Real(0.4)*Lx;
+        const Real r  = Lx/Real(8.0);
+        const Real r2 = r*r;
+#if (AMREX_SPACEDIM > 1)
+        const Real Ly = prob_hi[1] - prob_lo[1];
+        const Real cy = prob_lo[1] + Real(0.6)*Ly;
+#endif
+#if (AMREX_SPACEDIM == 3)
+        const Real Lz = prob_hi[2] - prob_lo[2];
+        const Real cz = prob_lo[2] + Real(0.45)*Lz;
+#endif
+        for (int idim = 0; idim < 3; ++idim) {
+            const Real ox = (idim == 0 && 0 < AMREX_SPACEDIM) ? Real(0.5) : Real(0);
+#if (AMREX_SPACEDIM > 1)
+            const Real oy = (idim == 1) ? Real(0.5) : Real(0);
+#endif
+#if (AMREX_SPACEDIM == 3)
+            const Real oz = (idim == 2) ? Real(0.5) : Real(0);
+#endif
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(overset_mask_mf[idim], TilingIfNotGPU());
+                 mfi.isValid(); ++mfi)
+            {
+                const Box& bx = mfi.tilebox();
+                auto const& m = overset_mask_mf[idim].array(mfi);
+                ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                {
+                    Real x = prob_lo[0] + (Real(i) + ox)*dx[0];
+                    Real d2 = (x - cx)*(x - cx);
+#if (AMREX_SPACEDIM > 1)
+                    Real y = prob_lo[1] + (Real(j) + oy)*dx[1];
+                    d2 += (y - cy)*(y - cy);
+#endif
+#if (AMREX_SPACEDIM == 3)
+                    Real z = prob_lo[2] + (Real(k) + oz)*dx[2];
+                    d2 += (z - cz)*(z - cz);
+#endif
+                    if (d2 < r2) { m(i,j,k) = 0; }
+                });
+            }
+        }
+    }
+
+    // Safety: never mask domain-boundary DOFs (BC code owns those).
+    // Re-set mask=1 on any DOF that lies on a nodal domain face.
+    for (int idim = 0; idim < 3; ++idim) {
+        IntVect itype(1);
+#if (AMREX_SPACEDIM < 3)
+        if (idim < AMREX_SPACEDIM)
+#endif
+        {
+            itype[idim] = 0;
+        }
+        const Box ndom = amrex::convert(domain, itype);
+        for (int d = 0; d < AMREX_SPACEDIM; ++d) {
+            if (itype[d] != 1) { continue; }   // only nodal directions own BC
+            for (int side = 0; side < 2; ++side) {
+                Box face = ndom;
+                if (side == 0) {
+                    face.setBig(d, ndom.smallEnd(d));
+                } else {
+                    face.setSmall(d, ndom.bigEnd(d));
+                }
+                for (MFIter mfi(overset_mask_mf[idim]); mfi.isValid(); ++mfi) {
+                    Box isect = mfi.validbox() & face;
+                    if (isect.ok()) {
+                        auto const& m = overset_mask_mf[idim].array(mfi);
+                        ParallelFor(isect, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
+                        {
+                            m(i,j,k) = 1;
+                        });
+                    }
+                }
+            }
+        }
     }
 }
