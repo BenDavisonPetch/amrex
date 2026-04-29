@@ -1055,10 +1055,9 @@ void MLCurlCurl::smooth4 (int amrlev, int mglev, MF& sol, MF const& rhs,
                                     b,dinfo,sinfo);
             });
         }
-    } else {
+    } else if (!has_alpha && has_beta) {
         // This branch covers scalar alpha and variable beta.
         // If LU is used, we will build local solvers.
-        AMREX_ASSERT(!has_alpha && has_beta);
         auto const& bcx = m_bcoefs[amrlev][mglev][0]->const_arrays();
         auto const& bcy = m_bcoefs[amrlev][mglev][1]->const_arrays();
         auto const& bcz = m_bcoefs[amrlev][mglev][2]->const_arrays();
@@ -1077,6 +1076,25 @@ void MLCurlCurl::smooth4 (int amrlev, int mglev, MF& sol, MF const& rhs,
                                       rhsx[bno],rhsy[bno],rhsz[bno],
                                       adxinv,color,bcx[bno],bcy[bno],bcz[bno],
                                       dinfo,sinfo);
+            });
+        }
+    } else {
+        AMREX_ASSERT(!has_alpha && !has_beta && has_osm);
+        auto b = m_beta;
+        auto const& nosm = m_nodal_overset_mask[amrlev][mglev]->const_arrays();
+        if (use_pcg) {
+            ParallelFor(nmf, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+            {
+                mlcurlcurl_gs4_os<true>(i,j,k,ex[bno],ey[bno],ez[bno],
+                                        rhsx[bno],rhsy[bno],rhsz[bno],
+                                        adxinv,color,b,nosm[bno],dinfo,sinfo);
+            });
+        } else {
+            ParallelFor(nmf, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+            {
+                mlcurlcurl_gs4_os<false>(i,j,k,ex[bno],ey[bno],ez[bno],
+                                         rhsx[bno],rhsy[bno],rhsz[bno],
+                                         adxinv,color,b,nosm[bno],dinfo,sinfo);
             });
         }
     }
@@ -1154,7 +1172,9 @@ void MLCurlCurl::update_lusolver ()
 {
 #if (AMREX_SPACEDIM > 1)
     // There is no global LU Solver that can be built for variable alpha or beta.
-    if (m_bcoefs[0][0][0] == nullptr && m_acoefs[0][0][0] == nullptr) {
+    // Overset mask zeroes per-node rows/cols, so the uniform factor is invalid too.
+    if (m_bcoefs[0][0][0] == nullptr && m_acoefs[0][0][0] == nullptr
+        && m_overset_mask[0][0][0] == nullptr) {
         for (int amrlev = 0;  amrlev < m_num_amr_levels; ++amrlev) {
             for (int mglev = 0; mglev < m_num_mg_levels[amrlev]; ++mglev) {
                 auto const& dxinv = this->m_geom[amrlev][mglev].InvCellSizeArray();
