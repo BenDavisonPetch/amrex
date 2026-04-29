@@ -71,14 +71,15 @@ void MLCurlCurl::define (const Vector<Geometry>& a_geom,
 {
     AMREX_ALWAYS_ASSERT_WITH_MESSAGE(a_overset_mask.size() == 1,
                                      "AMR not currently supported with overset mask");
-    AMREX_ALWAYS_ASSERT_WITH_MESSAGE(a_info.max_coarsening_level == 0,
-                                     "Haven't implemented MG with overset masks yet soz");
 
-    // Define overset mask multifabs and copy over
+    // Define overset mask multifabs and copy over. ng=1 so the smoother's
+    // per-box loop over nodal indices can safely read the cell-edge mask at
+    // i=box_hi+1: domain bndry ghost set to 1 (active), internal ghosts filled
+    // from neighbour fabs (periodic via geom).
     auto namrlevs = static_cast<int>(a_geom.size());
     m_overset_mask.resize(namrlevs);
     for (int amrlev = 0; amrlev < namrlevs; ++amrlev) {
-        constexpr int ng_osm = 0; // actually might need to be 2 for cf boundaries?? might not need to use osm for those tho
+        constexpr int ng_osm = 1;
         m_overset_mask[amrlev].push_back({std::make_unique<iMultiFab>(amrex::convert(a_grids[amrlev], m_etype[0]),
                                                                          a_dmap[amrlev], 1, ng_osm),
                                             std::make_unique<iMultiFab>(amrex::convert(a_grids[amrlev], m_etype[1]),
@@ -90,6 +91,8 @@ void MLCurlCurl::define (const Vector<Geometry>& a_geom,
                 a_overset_mask[amrlev][idim]->ixType() == IndexType(m_etype[idim]),
                 "MLCurlCurl: overset mask index type must match edge centering");
             iMultiFab::Copy(*(m_overset_mask[amrlev][0][idim]), *a_overset_mask[amrlev][idim], 0, 0, 1, 0);
+            m_overset_mask[amrlev][0][idim]->setDomainBndry(1, a_geom[amrlev]);
+            m_overset_mask[amrlev][0][idim]->FillBoundary(a_geom[amrlev].periodicity());
         }
         if (amrlev > 1) {
             AMREX_ALWAYS_ASSERT(amrex::refine(a_geom[amrlev-1].Domain(),2)
@@ -97,9 +100,76 @@ void MLCurlCurl::define (const Vector<Geometry>& a_geom,
         }
     }
 
-    // TODO: determine max MG coarsening level based on overset mask
-    // (mixed faces not allowed)
-    MLLinOpT<MF>::define(a_geom, a_grids, a_dmap, a_info, {});
+    // Determine max MG coarsening level by attempting to coarsen the supplied
+    // edge/face overset masks. A coarse cell is allowed only if all underlying
+    // fine entries agree (all 1 -> 1, all 0 -> 0); any mixed coarse cell makes
+    // the level uncoarsenable.
+    {
+        const int amrlev = 0;
+        Box dom = a_geom[0].Domain();
+        Geometry cgeom = a_geom[0];
+        for (int mglev = 1; mglev <= a_info.max_coarsening_level; ++mglev) {
+            AMREX_ALWAYS_ASSERT(this->mg_coarsen_ratio == 2);
+            if (!dom.coarsenable(2)) { break; }
+
+            Array<std::unique_ptr<iMultiFab>, 3> crse;
+            bool ok = true;
+            for (int idim = 0; idim < 3; ++idim) {
+                iMultiFab const& fine = *(m_overset_mask[amrlev][mglev-1][idim]);
+                if (!fine.boxArray().coarsenable(2)) { ok = false; break; }
+                crse[idim] = std::make_unique<iMultiFab>(
+                    amrex::coarsen(fine.boxArray(), 2),
+                    fine.DistributionMap(), 1, 1);
+
+                if (m_etype[idim] == IntVect(1)) {
+                    // Pure-nodal: coarse node value = corresponding fine node value.
+                    amrex::average_down_nodal(fine, *crse[idim], IntVect(2));
+                } else {
+                    ReduceOps<ReduceOpSum> reduce_op;
+                    ReduceData<int> reduce_data(reduce_op);
+                    using ReduceTuple = typename decltype(reduce_data)::Type;
+                    const IntVect et = m_etype[idim];
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+                    for (MFIter mfi(*crse[idim], TilingIfNotGPU()); mfi.isValid(); ++mfi)
+                    {
+                        const Box& bx = mfi.tilebox();
+                        Array4<int const> const& fmsk = fine.const_array(mfi);
+                        Array4<int> const& cmsk = crse[idim]->array(mfi);
+                        reduce_op.eval(bx, reduce_data,
+                        [=] AMREX_GPU_HOST_DEVICE (Box const& b) -> ReduceTuple
+                        {
+                            return { coarsen_overset_mask_etype(b, et, cmsk, fmsk) };
+                        });
+                    }
+                    int mixed = amrex::get<0>(reduce_data.value(reduce_op));
+                    ParallelAllReduce::Max(mixed, ParallelContext::CommunicatorSub());
+                    if (mixed > 0) { ok = false; break; }
+                }
+            }
+            if (!ok) { break; }
+            dom.coarsen(2);
+            cgeom.coarsen(IntVect(2));
+            for (int idim = 0; idim < 3; ++idim) {
+                crse[idim]->setDomainBndry(1, cgeom);
+                crse[idim]->FillBoundary(cgeom.periodicity());
+            }
+            m_overset_mask[amrlev].push_back({std::move(crse[0]),
+                                              std::move(crse[1]),
+                                              std::move(crse[2])});
+        }
+        int max_overset_mask_coarsening_level =
+            static_cast<int>(m_overset_mask[amrlev].size()) - 1;
+        ParallelAllReduce::Min(max_overset_mask_coarsening_level,
+                               ParallelContext::CommunicatorSub());
+        m_overset_mask[amrlev].resize(max_overset_mask_coarsening_level + 1);
+
+        LPInfo linfo = a_info;
+        linfo.max_coarsening_level = std::min(a_info.max_coarsening_level,
+                                              max_overset_mask_coarsening_level);
+        MLLinOpT<MF>::define(a_geom, a_grids, a_dmap, linfo, {});
+    }
 
     // Initialise everything else normally
     m_coord = a_coord;
@@ -134,6 +204,28 @@ void MLCurlCurl::define (const Vector<Geometry>& a_geom,
         m_lusolver[amrlev].resize(this->m_num_mg_levels[amrlev]);
     }
 
+    // Ensure the coarsened overset masks live on the same DistributionMap as
+    // the linop's grids at each mglev. If the layouts differ (MFIter-unsafe),
+    // ParallelCopy onto a freshly-allocated mask using the linop's DM, then
+    // re-establish ng=1 ghost values for the new layout.
+    for (int amrlev = 0; amrlev < namrlevs; ++amrlev) {
+        for (int mglev = 1; mglev < this->m_num_mg_levels[amrlev]; ++mglev) {
+            for (int idim = 0; idim < 3; ++idim) {
+                BoxArray ba = amrex::convert(this->m_grids[amrlev][mglev], m_etype[idim]);
+                iMultiFab foo(ba, this->m_dmap[amrlev][mglev], 1, 0,
+                              MFInfo().SetAlloc(false));
+                if (! amrex::isMFIterSafe(*(m_overset_mask[amrlev][mglev][idim]), foo)) {
+                    auto osm = std::make_unique<iMultiFab>(
+                        ba, this->m_dmap[amrlev][mglev], 1, 1);
+                    osm->ParallelCopy(*(m_overset_mask[amrlev][mglev][idim]));
+                    osm->setDomainBndry(1, this->m_geom[amrlev][mglev]);
+                    osm->FillBoundary(this->m_geom[amrlev][mglev].periodicity());
+                    std::swap(osm, m_overset_mask[amrlev][mglev][idim]);
+                }
+            }
+        }
+    }
+
     // Build truly-nodal overset mask from the user-supplied edge/face masks.
     // node_mask = 1 iff every DOF the smoother stencil at (i,j,k) touches is
     // unmasked (osm = 1); 0 if any of those DOFs is masked.
@@ -141,32 +233,38 @@ void MLCurlCurl::define (const Vector<Geometry>& a_geom,
     for (int amrlev = 0; amrlev < namrlevs; ++amrlev) {
         m_nodal_overset_mask[amrlev].resize(this->m_num_mg_levels[amrlev]);
 
-        BoxArray nba = amrex::convert(a_grids[amrlev], IntVect(1));
-        m_nodal_overset_mask[amrlev][0]
-            = std::make_unique<iMultiFab>(nba, a_dmap[amrlev], 1, 0);
+        for (int mglev = 0; mglev < this->m_num_mg_levels[amrlev]; ++mglev) {
+            BoxArray nba = amrex::convert(this->m_grids[amrlev][mglev], IntVect(1));
+            m_nodal_overset_mask[amrlev][mglev]
+                = std::make_unique<iMultiFab>(nba, this->m_dmap[amrlev][mglev], 1, 0);
 
-        auto const& xosm = m_overset_mask[amrlev][0][0]->const_arrays();
-        auto const& yosm = m_overset_mask[amrlev][0][1]->const_arrays();
-        auto const& zosm = m_overset_mask[amrlev][0][2]->const_arrays();
-        auto const& nosm = m_nodal_overset_mask[amrlev][0]->arrays();
+            auto const& xosm = m_overset_mask[amrlev][mglev][0]->const_arrays();
+            auto const& yosm = m_overset_mask[amrlev][mglev][1]->const_arrays();
+            auto const& zosm = m_overset_mask[amrlev][mglev][2]->const_arrays();
+            auto const& nosm = m_nodal_overset_mask[amrlev][mglev]->arrays();
 
-        ParallelFor(*m_nodal_overset_mask[amrlev][0],
-            [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
-        {
+            ParallelFor(*m_nodal_overset_mask[amrlev][mglev],
+                [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+            {
+                // Edge masks have ng=1 with out-of-domain ghosts set to 1
+                // (active) and internal ghosts FillBoundary'd, so direct reads
+                // at i-1 / j-1 / k-1 are in bounds with the correct values.
 #if (AMREX_SPACEDIM == 2)
-            bool active = xosm[bno](i-1,j  ,k) && xosm[bno](i  ,j,k)
-                       && yosm[bno](i  ,j-1,k) && yosm[bno](i  ,j,k)
-                       && zosm[bno](i  ,j  ,k);
+                bool active = xosm[bno](i-1, j  , k) && xosm[bno](i, j, k)
+                           && yosm[bno](i  , j-1, k) && yosm[bno](i, j, k)
+                           && zosm[bno](i  , j  , k);
 #elif (AMREX_SPACEDIM == 3)
-            bool active = xosm[bno](i-1,j  ,k  ) && xosm[bno](i,j,k)
-                       && yosm[bno](i  ,j-1,k  ) && yosm[bno](i,j,k)
-                       && zosm[bno](i  ,j  ,k-1) && zosm[bno](i,j,k);
+                bool active = xosm[bno](i-1, j  , k  ) && xosm[bno](i, j, k)
+                           && yosm[bno](i  , j-1, k  ) && yosm[bno](i, j, k)
+                           && zosm[bno](i  , j  , k-1) && zosm[bno](i, j, k);
 #else
-            bool active = xosm[bno](i,j,k) && yosm[bno](i,j,k) && zosm[bno](i,j,k);
+                bool active = xosm[bno](i, j, k) && yosm[bno](i, j, k)
+                           && zosm[bno](i, j, k);
 #endif
-            nosm[bno](i,j,k) = active ? 1 : 0;
-        });
-        Gpu::streamSynchronize();
+                nosm[bno](i,j,k) = active ? 1 : 0;
+            });
+            Gpu::streamSynchronize();
+        }
     }
 }
 
@@ -829,6 +927,7 @@ void MLCurlCurl::smooth1D (int amrlev, int mglev, MF& sol, MF const& rhs,
             auto const& zosm = m_overset_mask[amrlev][mglev][2]->const_arrays();
             ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
             {
+                amrex::Print() << "Looping over " << i << " w/ bno = " << bno << std::endl;
                 bool valid_x = i <= xhi; // x is cell-centered, not nodal
                 mlcurlcurl_smooth_1d(i,j,k,ex[bno],ey[bno],ez[bno],
                                      rhsx[bno],rhsy[bno],rhsz[bno],

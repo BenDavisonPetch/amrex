@@ -2693,6 +2693,52 @@ void mlcurlcurl_bc_symmetry (int i, int j, int k, Orientation face, IndexType it
     }
 }
 
+// Coarsen overset mask for an edge with given index type (etype: 0=cell, 1=nodal per dim).
+// Returns the count of mixed coarse cells (>0 => uncoarsenable).
+AMREX_GPU_HOST_DEVICE AMREX_FORCE_INLINE
+int coarsen_overset_mask_etype (Box const& bx, IntVect const& etype,
+                                Array4<int> const& cmsk,
+                                Array4<int const> const& fmsk) noexcept
+{
+    int nerrors = 0;
+    const auto lo = amrex::lbound(bx);
+    const auto hi = amrex::ubound(bx);
+    const int sx = (etype[0] == 0) ? 2 : 1;
+#if (AMREX_SPACEDIM >= 2)
+    const int sy = (etype[1] == 0) ? 2 : 1;
+#else
+    const int sy = 1;
+#endif
+#if (AMREX_SPACEDIM == 3)
+    const int sz = (etype[2] == 0) ? 2 : 1;
+#else
+    const int sz = 1;
+#endif
+    const int target = sx * sy * sz;
+    for (int k = lo.z; k <= hi.z; ++k) {
+    for (int j = lo.y; j <= hi.y; ++j) {
+    for (int i = lo.x; i <= hi.x; ++i) {
+        const int ii = 2*i;
+        const int jj = 2*j;
+        const int kk = 2*k;
+        int sum = 0;
+        for (int dk = 0; dk < sz; ++dk) {
+        for (int dj = 0; dj < sy; ++dj) {
+        for (int di = 0; di < sx; ++di) {
+            sum += fmsk(ii+di, jj+dj, kk+dk);
+        }}}
+        if (sum == target) {
+            cmsk(i,j,k) = 1;
+        } else if (sum == 0) {
+            cmsk(i,j,k) = 0;
+        } else {
+            cmsk(i,j,k) = 0;
+            ++nerrors;
+        }
+    }}}
+    return nerrors;
+}
+
 }
 
 #endif
