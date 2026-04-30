@@ -1033,7 +1033,6 @@ void MLCurlCurl::smooth1D (int amrlev, int mglev, MF& sol, MF const& rhs,
             auto const& zosm = m_overset_mask[amrlev][mglev][2]->const_arrays();
             ParallelFor( nmf, [=] AMREX_GPU_DEVICE(int bno, int i, int j, int k)
             {
-                amrex::Print() << "Looping over " << i << " w/ bno = " << bno << std::endl;
                 bool valid_x = i <= xhi; // x is cell-centered, not nodal
                 mlcurlcurl_smooth_1d(i,j,k,ex[bno],ey[bno],ez[bno],
                                      rhsx[bno],rhsy[bno],rhsz[bno],
@@ -1167,9 +1166,14 @@ void MLCurlCurl::smooth4 (int amrlev, int mglev, MF& sol, MF const& rhs,
         auto const& bcx = m_bcoefs[amrlev][mglev][0]->const_arrays();
         auto const& bcy = m_bcoefs[amrlev][mglev][1]->const_arrays();
         auto const& bcz = m_bcoefs[amrlev][mglev][2]->const_arrays();
+        MultiArray4<int const> nosm{};
+        if (has_osm) {
+            nosm = m_nodal_overset_mask[amrlev][mglev]->const_arrays();
+        }
         if (use_pcg) {
             ParallelFor(nmf, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
             {
+                if (nosm && nosm[bno](i,j,k) == 0) { return; }
                 mlcurlcurl_gs4<true>(i,j,k,ex[bno],ey[bno],ez[bno],
                                      rhsx[bno],rhsy[bno],rhsz[bno],
                                      adxinv,color,bcx[bno],bcy[bno],bcz[bno],
@@ -1178,6 +1182,7 @@ void MLCurlCurl::smooth4 (int amrlev, int mglev, MF& sol, MF const& rhs,
         } else {
             ParallelFor(nmf, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
             {
+                if (nosm && nosm[bno](i,j,k) == 0) { return; }
                 mlcurlcurl_gs4<false>(i,j,k,ex[bno],ey[bno],ez[bno],
                                       rhsx[bno],rhsy[bno],rhsz[bno],
                                       adxinv,color,bcx[bno],bcy[bno],bcz[bno],
