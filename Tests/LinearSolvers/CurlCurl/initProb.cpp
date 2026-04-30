@@ -103,6 +103,7 @@ MyTest::populateOversetMask ()
     } else if (overset_pattern == OversetPattern::Box) {
         const Box mask_region = amrex::grow(domain, -(n_cell/4));
         for (int idim = 0; idim < 3; ++idim) {
+            const Box mask_region_conv = amrex::convert(mask_region, overset_mask_mf[idim].ixType());
 #ifdef AMREX_USE_OMP
 #pragma omp parallel if (Gpu::notInLaunchRegion())
 #endif
@@ -113,7 +114,7 @@ MyTest::populateOversetMask ()
                 auto const& m = overset_mask_mf[idim].array(mfi);
                 ParallelFor(bx, [=] AMREX_GPU_DEVICE (int i, int j, int k) noexcept
                 {
-                    if (mask_region.contains(IntVect(AMREX_D_DECL(i,j,k)))) {
+                    if (mask_region_conv.contains(IntVect(AMREX_D_DECL(i,j,k)))) {
                         m(i,j,k) = 0;
                     }
                 });
