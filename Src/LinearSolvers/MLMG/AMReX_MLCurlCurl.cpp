@@ -507,6 +507,40 @@ void MLCurlCurl::setDirichletNodesToZero (int amrlev, int mglev, MF& a_mf) const
         tag.dfab(i,j,k) = RT(0.0);
     });
 #endif
+    // Zero dirichlet values set by overset mask
+    if (m_overset_mask[amrlev][mglev][0] != nullptr)
+    {
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+        AMREX_ASSERT(a_mf[0].nGrowVect() == IntVect(0));
+        AMREX_ASSERT(a_mf[1].nGrowVect() == IntVect(0));
+        AMREX_ASSERT(a_mf[2].nGrowVect() == IntVect(0));
+        for (MFIter mfi(a_mf[0], mfi_info); mfi.isValid(); ++mfi) {
+            Box const& xbx = mfi.tilebox(a_mf[0].ixType().toIntVect());
+            Box const& ybx = mfi.tilebox(a_mf[1].ixType().toIntVect());
+            Box const& zbx = mfi.tilebox(a_mf[2].ixType().toIntVect());
+            const auto& xosm = m_overset_mask[amrlev][mglev][0]->const_array(mfi);
+            const auto& yosm = m_overset_mask[amrlev][mglev][1]->const_array(mfi);
+            const auto& zosm = m_overset_mask[amrlev][mglev][2]->const_array(mfi);
+            const auto& xout = a_mf[0].array(mfi);
+            const auto& yout = a_mf[1].array(mfi);
+            const auto& zout = a_mf[2].array(mfi);
+            ParallelFor(xbx,ybx,zbx,
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (xosm(i,j,k) == 0) {xout(i,j,k) = Real(0.0); }
+            },
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (yosm(i,j,k) == 0) {yout(i,j,k) = Real(0.0); }
+            },
+            [=] AMREX_GPU_DEVICE (int i, int j, int k)
+            {
+                if (zosm(i,j,k) == 0) {zout(i,j,k) = Real(0.0); }
+            });
+        }
+    }
 }
 
 void MLCurlCurl::setLevelBC (int amrlev, const MF* levelbcdata, // TODO
