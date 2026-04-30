@@ -570,18 +570,54 @@ void MLCurlCurl::restriction (int amrlev, int cmglev, MF& crse, MF& fine) const
 
         MultiFab* pcrse = (need_parallel_copy) ? &cfine : &(crse[idim]);
 
+        // Coarse overset mask for this idim's edge centering. When mask layout
+        // is MFIter-incompatible with cfine, fall back to no mask in-kernel and
+        // post-zero via ParallelCopy below.
+        bool have_osm = (m_overset_mask[amrlev][cmglev][idim] != nullptr);
+        bool osm_iter_safe = have_osm
+            && amrex::isMFIterSafe(*pcrse, *m_overset_mask[amrlev][cmglev][idim]);
+
         auto const& crsema = pcrse->arrays();
         auto const& finema = fine[idim].const_arrays();
-        ParallelFor(*pcrse, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
-        {
-            mlcurlcurl_restriction(idim,i,j,k,crsema[bno],finema[bno],dinfo);
-        });
+        if (have_osm && osm_iter_safe) {
+            auto const& osma = m_overset_mask[amrlev][cmglev][idim]->const_arrays();
+            ParallelFor(*pcrse, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+            {
+                mlcurlcurl_restriction(idim,i,j,k,crsema[bno],finema[bno],dinfo,
+                                       osma[bno]);
+            });
+        } else {
+            ParallelFor(*pcrse, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+            {
+                Array4<int const> empty;
+                mlcurlcurl_restriction(idim,i,j,k,crsema[bno],finema[bno],dinfo,
+                                       empty);
+            });
+        }
         if (!Gpu::inNoSyncRegion()) {
             Gpu::streamSynchronize();
         }
 
         if (need_parallel_copy) {
             crse[idim].ParallelCopy(cfine);
+        }
+
+        // Zero coarse-masked edges on crse[idim] in case the
+        // in-kernel mask was unavailable or
+        // ParallelCopy brought in nonzero values from a foreign layout.
+        if (have_osm && !osm_iter_safe) {
+            // ParallelCopy mask onto crse's layout so we can zero per-bno.
+            iMultiFab osm_local(crse[idim].boxArray(),
+                                crse[idim].DistributionMap(), 1, 0);
+            osm_local.setVal(1);
+            osm_local.ParallelCopy(*m_overset_mask[amrlev][cmglev][idim]);
+            auto const& cma = crse[idim].arrays();
+            auto const& lma = osm_local.const_arrays();
+            ParallelFor(crse[idim], [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+            {
+                if (lma[bno](i,j,k) == 0) { cma[bno](i,j,k) = Real(0.0); }
+            });
+            if (!Gpu::inNoSyncRegion()) { Gpu::streamSynchronize(); }
         }
     }
 }
@@ -594,25 +630,61 @@ void MLCurlCurl::interpolation (int amrlev, int fmglev, MF& fine,
 
     auto dinfo = getDirichletInfo(amrlev,fmglev);
 
+    int const cmglev = fmglev + 1;
+    bool const have_cosm = (m_overset_mask[amrlev][cmglev][0] != nullptr);
+    bool const have_fosm = (m_overset_mask[amrlev][fmglev][0] != nullptr);
+
     for (int idim = 0; idim < 3; ++idim) {
         bool need_parallel_copy = !amrex::isMFIterSafe(crse[idim], fine[idim]);
-        MultiFab cfine;
+        bool need_local = need_parallel_copy || have_cosm;
+
+        MultiFab cwork;
         MultiFab const* cmf = &(crse[idim]);
-        if (need_parallel_copy) {
-            BoxArray const& ba = amrex::coarsen(fine[idim].boxArray(), 2);
-            cfine.define(ba, fine[idim].DistributionMap(), 1, 0,
-                         MFInfo().SetArena(The_Async_Arena()));
-            cfine.ParallelCopy(crse[idim]);
-            cmf = &cfine;
+        if (need_local) {
+            BoxArray ba = need_parallel_copy
+                          ? amrex::coarsen(fine[idim].boxArray(), 2)
+                          : crse[idim].boxArray();
+            DistributionMapping dm = need_parallel_copy
+                                     ? fine[idim].DistributionMap()
+                                     : crse[idim].DistributionMap();
+            cwork.define(ba, dm, 1, 0, MFInfo().SetArena(The_Async_Arena()));
+            cwork.ParallelCopy(crse[idim]);
+            cmf = &cwork;
         }
+
+        // Pre-zero coarse correction at coarse-masked edges so interp does
+        // not leak coarse_cor into fine masked DOFs.
+        if (have_cosm) {
+            iMultiFab osm_local(cwork.boxArray(), cwork.DistributionMap(), 1, 0);
+            osm_local.setVal(1);
+            osm_local.ParallelCopy(*m_overset_mask[amrlev][cmglev][idim]);
+            auto const& zma = cwork.arrays();
+            auto const& osma = osm_local.const_arrays();
+            ParallelFor(cwork, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+            {
+                if (osma[bno](i,j,k) == 0) { zma[bno](i,j,k) = Real(0.0); }
+            });
+            if (!Gpu::inNoSyncRegion()) { Gpu::streamSynchronize(); }
+        }
+
         auto const& finema = fine[idim].arrays();
         auto const& crsema = cmf->const_arrays();
-        ParallelFor(fine[idim], [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
-        {
-            if (!dinfo.is_dirichlet_edge(idim,i,j,k)) {
-                mlcurlcurl_interpadd(idim,i,j,k,finema[bno],crsema[bno]);
-            }
-        });
+        if (have_fosm) {
+            auto const& fosma = m_overset_mask[amrlev][fmglev][idim]->const_arrays();
+            ParallelFor(fine[idim], [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+            {
+                if (!dinfo.is_dirichlet_edge(idim,i,j,k) && fosma[bno](i,j,k) != 0) {
+                    mlcurlcurl_interpadd(idim,i,j,k,finema[bno],crsema[bno]);
+                }
+            });
+        } else {
+            ParallelFor(fine[idim], [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+            {
+                if (!dinfo.is_dirichlet_edge(idim,i,j,k)) {
+                    mlcurlcurl_interpadd(idim,i,j,k,finema[bno],crsema[bno]);
+                }
+            });
+        }
         if (!Gpu::inNoSyncRegion()) {
             Gpu::streamSynchronize();
         }
@@ -1174,10 +1246,21 @@ void MLCurlCurl::compresid (int amrlev, int mglev, MF& resid, MF const& b) const
         auto const& bx = b[0].array(mfi);
         auto const& by = b[1].array(mfi);
         auto const& bz = b[2].array(mfi);
+        Array4<int const> xosm, yosm, zosm;
+        if (m_overset_mask[amrlev][mglev][0])
+        {
+            AMREX_ASSERT(m_overset_mask[amrlev][mglev][1]);
+            AMREX_ASSERT(m_overset_mask[amrlev][mglev][2]);
+            xosm = m_overset_mask[amrlev][mglev][0]->const_array(mfi);
+            yosm = m_overset_mask[amrlev][mglev][1]->const_array(mfi);
+            zosm = m_overset_mask[amrlev][mglev][2]->const_array(mfi);
+        }
         amrex::ParallelFor(xbx, ybx, zbx,
         [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
             if (dinfo.is_dirichlet_x_edge(i,j,k)) {
+                resx(i,j,k) = Real(0.0);
+            } else if (xosm && xosm(i,j,k) == 0) {
                 resx(i,j,k) = Real(0.0);
             } else {
                 resx(i,j,k) = bx(i,j,k) - resx(i,j,k);
@@ -1187,6 +1270,8 @@ void MLCurlCurl::compresid (int amrlev, int mglev, MF& resid, MF const& b) const
         {
             if (dinfo.is_dirichlet_y_edge(i,j,k)) {
                 resy(i,j,k) = Real(0.0);
+            } else if (yosm && yosm(i,j,k) == 0) {
+                resy(i,j,k) = Real(0.0);
             } else {
                 resy(i,j,k) = by(i,j,k) - resy(i,j,k);
             }
@@ -1194,6 +1279,8 @@ void MLCurlCurl::compresid (int amrlev, int mglev, MF& resid, MF const& b) const
         [=] AMREX_GPU_DEVICE (int i, int j, int k)
         {
             if (dinfo.is_dirichlet_z_edge(i,j,k)) {
+                resz(i,j,k) = Real(0.0);
+            } else if (zosm && zosm(i,j,k) == 0) {
                 resz(i,j,k) = Real(0.0);
             } else {
                 resz(i,j,k) = bz(i,j,k) - resz(i,j,k);
@@ -1353,9 +1440,40 @@ Real MLCurlCurl::xdoty (int amrlev, int mglev, const MF& x, const MF& y,
     return result;
 }
 
-Real MLCurlCurl::normInf (int /*amrlev*/, MF const& mf, bool local) const
+Real MLCurlCurl::normInf (int amrlev, MF const& mf, bool local) const
 {
-    return amrex::norminf(mf, 0, m_ncomp, IntVect(0), local);
+    constexpr int mglev = 0;
+    Real r = Real(0.0);
+    for (int idim = 0; idim < 3; ++idim) {
+        Real ridim;
+        if (m_overset_mask[amrlev][mglev][idim]) {
+            ReduceOps<ReduceOpMax> reduce_op;
+            ReduceData<Real> reduce_data(reduce_op);
+            using ReduceTuple = typename decltype(reduce_data)::Type;
+#ifdef AMREX_USE_OMP
+#pragma omp parallel if (Gpu::notInLaunchRegion())
+#endif
+            for (MFIter mfi(mf[idim], TilingIfNotGPU()); mfi.isValid(); ++mfi) {
+                Box const& bx = mfi.tilebox();
+                auto const& a = mf[idim].const_array(mfi);
+                auto const& osm = m_overset_mask[amrlev][mglev][idim]->const_array(mfi);
+                reduce_op.eval(bx, reduce_data,
+                [=] AMREX_GPU_HOST_DEVICE (int i, int j, int k) -> ReduceTuple
+                {
+                    return { (osm(i,j,k) == 0) ? Real(0.0)
+                                               : std::abs(a(i,j,k)) };
+                });
+            }
+            ridim = amrex::get<0>(reduce_data.value(reduce_op));
+        } else {
+            ridim = amrex::norminf(mf[idim], 0, m_ncomp, IntVect(0), true);
+        }
+        r = std::max(r, ridim);
+    }
+    if (!local) {
+        ParallelAllReduce::Max(r, ParallelContext::CommunicatorSub());
+    }
+    return r;
 }
 
 void MLCurlCurl::averageDownAndSync (Vector<MF>& sol) const
@@ -1589,6 +1707,18 @@ iMultiFab const& MLCurlCurl::getDotMask (int amrlev, int mglev, int idim) const
                      this->m_dmap[amrlev][mglev], 1, 0, MFInfo().SetAlloc(false));
         m_dotmask[amrlev][mglev][idim] =
             tmp.OwnerMask(this->m_geom[amrlev][mglev].periodicity());
+
+        // AND in overset mask so masked DOFs are not counted in dot products.
+        if (m_overset_mask[amrlev][mglev][idim]) {
+            auto& dm = *m_dotmask[amrlev][mglev][idim];
+            auto const& dma = dm.arrays();
+            auto const& osma = m_overset_mask[amrlev][mglev][idim]->const_arrays();
+            ParallelFor(dm, [=] AMREX_GPU_DEVICE (int bno, int i, int j, int k)
+            {
+                if (osma[bno](i,j,k) == 0) { dma[bno](i,j,k) = 0; }
+            });
+            if (!Gpu::inNoSyncRegion()) { Gpu::streamSynchronize(); }
+        }
     }
     return *m_dotmask[amrlev][mglev][idim];
 }
@@ -1687,7 +1817,7 @@ void MLCurlCurl::update ()
 
 void MLCurlCurl::applyOverset (int amrlev, Array<MultiFab,3>& rhs) const
 {
-    // is this only called on the coarsest level?
+    // Called once on finest level (mglev=0) by MLMG::prepareForSolve.
     if (m_overset_mask[amrlev][0][0]) {
         for (int idim = 0; idim < 3; ++idim)
         {

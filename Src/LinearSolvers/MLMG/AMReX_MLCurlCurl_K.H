@@ -2866,11 +2866,16 @@ AMREX_GPU_DEVICE AMREX_FORCE_INLINE
 void mlcurlcurl_restriction (int dir, int i, int j, int k,
                              Array4<Real> const& crse,
                              Array4<Real const> const& fine,
-                             CurlCurlDirichletInfo const& dinfo)
+                             CurlCurlDirichletInfo const& dinfo,
+                             Array4<int const> const& osm)
 {
     int ii = i*2;
     int jj = j*2;
     int kk = k*2;
+    if (osm && osm(i,j,k) == 0) {
+        crse(i,j,k) = Real(0.0);
+        return;
+    }
     if (dinfo.is_dirichlet_edge(dir,ii,jj,kk)) {
         crse(i,j,k) = Real(0.0);
     }
